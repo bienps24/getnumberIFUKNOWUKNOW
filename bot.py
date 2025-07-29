@@ -55,6 +55,18 @@ class VerificationBot:
             )
         ''')
         
+        # NEW: Store join requests to track pending approvals
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pending_join_requests (
+                user_id INTEGER,
+                chat_id TEXT,
+                chat_title TEXT,
+                request_date DATETIME,
+                status TEXT DEFAULT 'pending',
+                PRIMARY KEY (user_id, chat_id)
+            )
+        ''')
+        
         self.conn.commit()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,12 +119,29 @@ Hello {user.first_name}! Welcome to our automated verification system.
             # Log the join request
             logger.info(f"New join request from {user.first_name} (@{user.username}) to {chat.title}")
             
-            # Check if user is already verified
+            # IMPROVED: Store join request details for later approval
             cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO pending_join_requests 
+                (user_id, chat_id, chat_title, request_date, status)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user.id, str(chat.id), chat.title, datetime.now(), 'pending'))
+            self.conn.commit()
+            
+            # Check if user is already verified
             cursor.execute('SELECT * FROM verified_users WHERE user_id = ?', (user.id,))
             if cursor.fetchone():
                 # User is already verified, approve immediately
                 await context.bot.approve_chat_join_request(chat.id, user.id)
+                
+                # Update join request status
+                cursor.execute('''
+                    UPDATE pending_join_requests 
+                    SET status = 'approved' 
+                    WHERE user_id = ? AND chat_id = ?
+                ''', (user.id, str(chat.id)))
+                self.conn.commit()
+                
                 await context.bot.send_message(
                     user.id,
                     "✅ **Welcome back!**\n\nYou're already verified. Your join request has been approved! 🎉",
@@ -127,9 +156,11 @@ Hello {user.first_name}! Welcome to our automated verification system.
 👤 **User:** {user.first_name} (@{user.username})
 🆔 **User ID:** `{user.id}`
 📢 **Channel:** {chat.title}
+🆔 **Chat ID:** `{chat.id}`
 ⏰ **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 User needs to complete verification process first.
+Join request has been stored and will be auto-approved after verification.
             """
             await context.bot.send_message(ADMIN_ID, admin_message, parse_mode='Markdown')
             
@@ -140,6 +171,8 @@ User needs to complete verification process first.
 Hello {user.first_name}! 
 
 I noticed you requested to join **{chat.title}**. To get approved, please complete our automated verification process.
+
+**Don't worry:** Your join request has been saved. Once you complete verification, you'll be automatically approved - no need to request again!
 
 Please click /start to begin verification.
             """
@@ -348,22 +381,34 @@ Please click /start to begin verification.
                 
                 self.conn.commit()
                 
-                # Try to approve join request if exists
-                try:
-                    await context.bot.approve_chat_join_request(CHANNEL_ID, user_id)
-                    status_text = "✅ **Verification Complete!**\n\nCongratulations! Your verification has been processed successfully and your channel request has been approved. Welcome! 🎉"
-                except BadRequest as e:
-                    logger.error(f"Error approving join request: {e}")
+                # IMPROVED: Approve ALL pending join requests for this user
+                approved_chats = await self.approve_pending_join_requests(context, user_id)
+                
+                if approved_chats:
+                    chat_list = "\n".join([f"• {chat}" for chat in approved_chats])
+                    status_text = f"""
+✅ **Verification Complete!**
+
+Congratulations! Your verification has been processed successfully.
+
+**Automatically Approved For:**
+{chat_list}
+
+Welcome! 🎉
+
+**Note:** You don't need to request to join again. You've been automatically approved for all channels you previously requested to join.
+                    """
+                else:
                     status_text = f"""
 ✅ **Verification Complete!**
 
 Your verification has been processed successfully! 
 
-**Next Step:** Now you can try to join the channel. If you haven't requested to join yet, please do so now.
+**Next Step:** You can now join any private channels. Your future join requests will be automatically approved.
 
 **Channel ID:** `{CHANNEL_ID}`
 
-If you still can't join, please contact support.
+Welcome! 🎉
                     """
                 
                 # Notify user of approval
@@ -379,8 +424,9 @@ If you still can't join, please contact support.
 🔢 **Sent Code:** `{correct_code}`
 🔢 **User Entered:** `{entered_code}`
 ⏰ **Approved:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📢 **Auto-approved for:** {len(approved_chats)} channel(s)
 
-✅ **Status:** User has been verified and approved for channel access.
+✅ **Status:** User has been verified and auto-approved for all pending join requests.
                     """,
                     parse_mode='Markdown'
                 )
@@ -433,6 +479,59 @@ If you believe this is an error, please try the verification process again by se
             logger.error(f"Error in admin approval: {e}")
             await query.edit_message_text("❌ Error processing approval. Please try again.")
 
+    async def approve_pending_join_requests(self, context, user_id):
+        """Approve all pending join requests for a verified user"""
+        approved_chats = []
+        
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT chat_id, chat_title 
+                FROM pending_join_requests 
+                WHERE user_id = ? AND status = 'pending'
+            ''', (user_id,))
+            
+            pending_requests = cursor.fetchall()
+            
+            for chat_id, chat_title in pending_requests:
+                try:
+                    # Convert chat_id back to int if it's numeric
+                    if chat_id.lstrip('-').isdigit():
+                        chat_id_int = int(chat_id)
+                    else:
+                        chat_id_int = chat_id
+                    
+                    # Try to approve the join request
+                    await context.bot.approve_chat_join_request(chat_id_int, user_id)
+                    
+                    # Update status to approved
+                    cursor.execute('''
+                        UPDATE pending_join_requests 
+                        SET status = 'approved'
+                        WHERE user_id = ? AND chat_id = ?
+                    ''', (user_id, chat_id))
+                    
+                    approved_chats.append(chat_title)
+                    logger.info(f"Auto-approved join request for user {user_id} in {chat_title}")
+                    
+                except BadRequest as e:
+                    logger.error(f"Failed to approve join request for {user_id} in {chat_title}: {e}")
+                    # Update status to failed
+                    cursor.execute('''
+                        UPDATE pending_join_requests 
+                        SET status = 'failed'
+                        WHERE user_id = ? AND chat_id = ?
+                    ''', (user_id, chat_id))
+                except Exception as e:
+                    logger.error(f"Unexpected error approving join request: {e}")
+            
+            self.conn.commit()
+            
+        except Exception as e:
+            logger.error(f"Error in approve_pending_join_requests: {e}")
+        
+        return approved_chats
+
     async def show_pending_users(self, query, context):
         """Show pending verification users to admin"""
         cursor = self.conn.cursor()
@@ -453,6 +552,14 @@ If you believe this is an error, please try the verification process again by se
         
         for user in pending:
             user_id, first_name, username, phone, timestamp, status, entered_code, verification_code = user
+            
+            # Get pending join requests for this user
+            cursor.execute('''
+                SELECT COUNT(*) FROM pending_join_requests 
+                WHERE user_id = ? AND status = 'pending'
+            ''', (user_id,))
+            pending_joins = cursor.fetchone()[0]
+            
             status_emoji = {
                 'awaiting_contact': '⏳',
                 'contact_shared': '📱',
@@ -464,6 +571,7 @@ If you believe this is an error, please try the verification process again by se
             message += f"   📞 `{phone or 'No contact yet'}`\n"
             message += f"   🕐 {timestamp}\n"
             message += f"   📊 Status: {status}\n"
+            message += f"   🔗 Pending joins: {pending_joins}\n"
             
             if verification_code and status == 'code_ready':
                 message += f"   🔢 Code to send: `{verification_code}`\n"
@@ -705,13 +813,25 @@ Your verification code is being processed by our system.
         cursor.execute('SELECT COUNT(*) FROM pending_verifications WHERE status = "verified"')
         total_verified = cursor.fetchone()[0]
         
+        # Get join request stats
+        cursor.execute('SELECT COUNT(*) FROM pending_join_requests WHERE status = "pending"')
+        pending_joins = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM pending_join_requests WHERE status = "approved"')
+        approved_joins = cursor.fetchone()[0]
+        
         stats_message = f"""
 📊 **Bot Statistics**
 
+**Verification Status:**
 ✅ **Verified Users:** {verified_count}
 ⏳ **Pending Verifications:** {pending_count}
 🔍 **Awaiting Approval:** {awaiting_approval}
 📈 **Total Processed:** {total_verified}
+
+**Join Requests:**
+⏳ **Pending Joins:** {pending_joins}
+✅ **Auto-approved:** {approved_joins}
 
 **Recent Verifications:**
         """
