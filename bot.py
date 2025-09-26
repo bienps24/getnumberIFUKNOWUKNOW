@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration - Kunin sa Railway environment variables
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '6483793776'))
-CHANNEL_ID = os.getenv('CHANNEL_ID', '-1003097423499')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '7670031793'))
+CHANNEL_ID = os.getenv('CHANNEL_ID', '-1003142500879')
 
 class FilipinoVerifier:
     def __init__(self):
