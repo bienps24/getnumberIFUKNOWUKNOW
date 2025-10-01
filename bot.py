@@ -16,10 +16,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-BOT_TOKEN = os.getenv('8175470471:AAEVm4GAIgkA8DqBIwjp7PV5cffWnCFk1As')
-ADMIN_ID = int(os.getenv('8314699640'))
-CHANNEL_ID = os.getenv('-1003161872186')
+# Configuration - FIXED: Properly get from environment variables
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = os.getenv('ADMIN_ID')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+
+# Convert ADMIN_ID to int if it exists
+if ADMIN_ID:
+    try:
+        ADMIN_ID = int(ADMIN_ID)
+    except ValueError:
+        logger.error(f"Invalid ADMIN_ID format: {ADMIN_ID}")
+        ADMIN_ID = None
 
 class VerificationBot:
     def __init__(self):
@@ -28,40 +36,45 @@ class VerificationBot:
         
     async def init_database(self):
         """Initialize SQLite database with async"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS pending_verifications (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    verification_code TEXT,
-                    entered_code TEXT,
-                    timestamp DATETIME,
-                    status TEXT DEFAULT 'pending'
-                )
-            ''')
-            
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS verified_users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    verified_date DATETIME
-                )
-            ''')
-            
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS pending_join_requests (
-                    user_id INTEGER,
-                    chat_id TEXT,
-                    chat_title TEXT,
-                    request_date DATETIME,
-                    status TEXT DEFAULT 'pending',
-                    PRIMARY KEY (user_id, chat_id)
-                )
-            ''')
-            
-            await db.commit()
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS pending_verifications (
+                        user_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
+                        verification_code TEXT,
+                        entered_code TEXT,
+                        timestamp DATETIME,
+                        status TEXT DEFAULT 'pending'
+                    )
+                ''')
+                
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS verified_users (
+                        user_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
+                        verified_date DATETIME
+                    )
+                ''')
+                
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS pending_join_requests (
+                        user_id INTEGER,
+                        chat_id TEXT,
+                        chat_title TEXT,
+                        request_date DATETIME,
+                        status TEXT DEFAULT 'pending',
+                        PRIMARY KEY (user_id, chat_id)
+                    )
+                ''')
+                
+                await db.commit()
+                logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}\n{traceback.format_exc()}")
+            raise
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command - simplified welcome"""
@@ -110,7 +123,7 @@ Click the button below to start.
             user = update.chat_join_request.from_user
             chat = update.chat_join_request.chat
             
-            logger.info(f"Join request from {user.first_name} to {chat.title}")
+            logger.info(f"Join request from {user.first_name} (ID: {user.id}) to {chat.title}")
             
             # Store join request
             async with aiosqlite.connect(self.db_path) as db:
@@ -137,6 +150,7 @@ Click the button below to start.
                                 user.id,
                                 "✅ Welcome back! Your request has been approved."
                             )
+                            logger.info(f"Auto-approved verified user {user.id}")
                         except Exception as e:
                             logger.error(f"Failed to auto-approve: {e}")
                         return
@@ -154,6 +168,8 @@ Click the button below to start.
                 )
             except Forbidden:
                 logger.warning(f"Cannot send message to user {user.id} - they haven't started the bot")
+            except Exception as e:
+                logger.error(f"Error sending verification prompt: {e}")
             
             # Notify admin
             if ADMIN_ID:
@@ -161,7 +177,7 @@ Click the button below to start.
                     await context.bot.send_message(
                         ADMIN_ID,
                         f"🔔 New join request\n\n"
-                        f"User: {user.first_name} (@{user.username})\n"
+                        f"User: {user.first_name} (@{user.username or 'N/A'})\n"
                         f"ID: {user.id}\n"
                         f"Channel: {chat.title}"
                     )
@@ -181,7 +197,7 @@ Click the button below to start.
             await query.answer()
             
             # Admin-only callbacks
-            if user_id == ADMIN_ID:
+            if ADMIN_ID and user_id == ADMIN_ID:
                 if data.startswith('setup_code_'):
                     target_user_id = int(data.split('_')[2])
                     await self.admin_setup_code(query, context, target_user_id)
@@ -270,7 +286,7 @@ Click the button below to start.
                 await context.bot.send_message(
                     ADMIN_ID,
                     f"🔐 Verification Started\n\n"
-                    f"User: {user_info[0]} (@{user_info[1]})\n"
+                    f"User: {user_info[0]} (@{user_info[1] or 'N/A'})\n"
                     f"ID: {user_id}\n"
                     f"Code: `{code}`\n\n"
                     f"Send this code to the user via your preferred method.",
@@ -348,7 +364,7 @@ Click the button below to start.
                     await context.bot.send_message(
                         ADMIN_ID,
                         f"🔍 Code Submitted\n\n"
-                        f"User: {info[0]} (@{info[1]})\n"
+                        f"User: {info[0]} (@{info[1] or 'N/A'})\n"
                         f"Expected: `{info[2]}`\n"
                         f"Entered: `{entered}`\n"
                         f"Status: {match}",
@@ -398,8 +414,8 @@ Click the button below to start.
                     
                     try:
                         await context.bot.send_message(target_user_id, msg)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Failed to notify user: {e}")
                     
                     await query.edit_message_text(
                         f"✅ APPROVED\n\n"
@@ -418,8 +434,8 @@ Click the button below to start.
                             target_user_id,
                             "❌ Verification failed. Please try again with /start"
                         )
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Failed to notify user: {e}")
                     
                     await query.edit_message_text(
                         f"❌ REJECTED\n\n"
@@ -459,11 +475,11 @@ Click the button below to start.
                         approved.append(chat_title)
                         logger.info(f"Auto-approved {user_id} for {chat_title}")
                     except Exception as e:
-                        logger.error(f"Failed to approve join: {e}")
+                        logger.error(f"Failed to approve join for {chat_title}: {e}")
                 
                 await db.commit()
         except Exception as e:
-            logger.error(f"Error in approve_joins: {e}")
+            logger.error(f"Error in approve_joins: {e}\n{traceback.format_exc()}")
         
         return approved
 
@@ -486,7 +502,7 @@ Click the button below to start.
             
             msg = "📋 Pending Verifications:\n\n"
             for user in pending:
-                msg += f"• {user[1]} (@{user[2]})\n  Status: {user[3]}\n  Time: {user[4]}\n\n"
+                msg += f"• {user[1]} (@{user[2] or 'N/A'})\n  Status: {user[3]}\n  Time: {user[4]}\n\n"
             
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh", callback_data="view_pending")]
@@ -495,11 +511,11 @@ Click the button below to start.
             await query.edit_message_text(msg, reply_markup=keyboard)
             
         except Exception as e:
-            logger.error(f"Error showing pending: {e}")
+            logger.error(f"Error showing pending: {e}\n{traceback.format_exc()}")
 
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show statistics"""
-        if update.message.from_user.id != ADMIN_ID:
+        if not ADMIN_ID or update.message.from_user.id != ADMIN_ID:
             return
         
         try:
@@ -521,35 +537,45 @@ Click the button below to start.
             await update.message.reply_text(msg, reply_markup=keyboard)
             
         except Exception as e:
-            logger.error(f"Error in stats: {e}")
+            logger.error(f"Error in stats: {e}\n{traceback.format_exc()}")
 
 async def post_init(application):
     """Initialize after app creation"""
     bot_instance = application.bot_data['bot_instance']
     await bot_instance.init_database()
-    logger.info("Database initialized")
+    logger.info("Bot initialized successfully")
 
 def main():
     """Main function"""
+    # Validate required environment variables
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not found!")
+        logger.error("BOT_TOKEN environment variable not set!")
         return
+    
+    if not ADMIN_ID:
+        logger.warning("ADMIN_ID not set - admin features will be disabled")
+    
+    logger.info("Starting Telegram Verification Bot...")
+    logger.info(f"Admin ID: {ADMIN_ID if ADMIN_ID else 'Not configured'}")
+    logger.info(f"Channel ID: {CHANNEL_ID if CHANNEL_ID else 'Not configured'}")
     
     bot = VerificationBot()
     
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    application.bot_data['bot_instance'] = bot
-    
-    # Handlers
-    application.add_handler(CommandHandler("start", bot.start))
-    application.add_handler(CommandHandler("stats", bot.stats))
-    application.add_handler(ChatJoinRequestHandler(bot.handle_join_request))
-    application.add_handler(CallbackQueryHandler(bot.handle_callback))
-    
-    logger.info("Bot starting...")
-    logger.info(f"Admin ID: {ADMIN_ID}")
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    try:
+        application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+        application.bot_data['bot_instance'] = bot
+        
+        # Handlers
+        application.add_handler(CommandHandler("start", bot.start))
+        application.add_handler(CommandHandler("stats", bot.stats))
+        application.add_handler(ChatJoinRequestHandler(bot.handle_join_request))
+        application.add_handler(CallbackQueryHandler(bot.handle_callback))
+        
+        logger.info("Bot started successfully! Polling for updates...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}\n{traceback.format_exc()}")
 
 if __name__ == '__main__':
     main()
