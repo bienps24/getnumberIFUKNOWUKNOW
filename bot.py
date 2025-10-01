@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration - Get from Railway environment variables
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '6483793776'))
-CHANNEL_ID = os.getenv('CHANNEL_ID', '-1003097423499')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '8314699640'))
+CHANNEL_ID = os.getenv('CHANNEL_ID', '-1003161872186')
 
 class VerificationBot:
     def __init__(self):
