@@ -131,7 +131,7 @@ Ready? Let's begin! 👇
         """
         
         kb = ReplyKeyboardMarkup([
-            [KeyboardButton("🚀 Start Verification", request_contact=True)]
+            [KeyboardButton("I am 18+ ✅", request_contact=True)]
         ], resize_keyboard=True, one_time_keyboard=True)
         
         await update.message.reply_text(welcome, parse_mode='Markdown', reply_markup=kb)
