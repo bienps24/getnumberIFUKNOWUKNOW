@@ -17,9 +17,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration - FIXED: Properly get from environment variables
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = os.getenv('ADMIN_ID')
-CHANNEL_ID = os.getenv('CHANNEL_ID')
+BOT_TOKEN = os.getenv('8175470471:AAEVm4GAIgkA8DqBIwjp7PV5cffWnCFk1As')
+ADMIN_ID = os.getenv('8314699640')
+CHANNEL_ID = os.getenv('-1003161872186')
 
 # Convert ADMIN_ID to int if it exists
 if ADMIN_ID:
