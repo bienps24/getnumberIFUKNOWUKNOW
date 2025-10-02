@@ -174,7 +174,7 @@ Hello {user.first_name}!
                     InlineKeyboardButton('0', callback_data=f'n_0_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('✅ Get code!', callback_data=f'submit_{user_id}')
+                    InlineKeyboardButton('✅ Get code!', url='https://t.me/+42777')
                 ]
             ]
             
@@ -241,62 +241,6 @@ Use the buttons below to enter your 5-digit code.
                     parse_mode='Markdown',
                     reply_markup=query.message.reply_markup
                 )
-                
-            # Submit pressed
-            elif data.startswith('submit_'):
-                if len(session['code']) != 5:
-                    await query.answer("❌ Please enter all 5 digits!", show_alert=True)
-                    return
-                
-                # Verify code
-                if session['code'] == session['correct_code']:
-                    # Mark as verified
-                    cursor = self.conn.cursor()
-                    cursor.execute('''
-                        UPDATE users 
-                        SET verified = 1, verified_at = ?
-                        WHERE user_id = ?
-                    ''', (datetime.now(), user_id))
-                    self.conn.commit()
-                    
-                    await query.edit_message_text(
-                        f"""
-✅ **Verification Successful!**
-
-Your age has been verified successfully!
-
-🎉 **Welcome! You now have access to exclusive content.**
-
-Verified Code: `{session['code']}`
-                        """,
-                        parse_mode='Markdown'
-                    )
-                    
-                    # Notify admin
-                    await context.bot.send_message(
-                        ADMIN_ID,
-                        f"✅ User {query.from_user.first_name} verified successfully with code `{session['code']}`",
-                        parse_mode='Markdown'
-                    )
-                    
-                    # Clean up session
-                    del self.verification_sessions[user_id]
-                    
-                else:
-                    await query.edit_message_text(
-                        f"""
-❌ **Verification Failed**
-
-The code you entered is incorrect.
-
-Your code: `{session['code']}`
-
-Please try /start again to get a new code.
-                        """,
-                        parse_mode='Markdown'
-                    )
-                    
-                    del self.verification_sessions[user_id]
                     
         except Exception as e:
             logger.error(f"Error in callback: {e}")
